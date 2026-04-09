@@ -1,4 +1,5 @@
-import { assertEquals, assertExists } from "@std/assert";
+import { assertEquals, assertExists, assertStringIncludes } from "@std/assert";
+import { Effect } from "effect";
 import { parseDiff } from "./parser.ts";
 
 const emptyDiff = "";
@@ -113,83 +114,117 @@ index abc1234..def5678 100644
 >>>>>>>
 `;
 
-Deno.test("parseDiff: empty string returns empty array", () => {
-  const result = parseDiff(emptyDiff);
-  assertEquals(result.length, 0);
+const malformedDiff = `garbage without proper diff header
+@@ -1 +1 @@
+`;
+
+const invalidHunkDiff = `diff --git a/file.txt b/file.txt
+index abc1234..def5678 100644
+--- a/file.txt
++++ b/file.txt
+@@ -abc,def +ghi,jkl @@ broken hunk
++new line
+`;
+
+Deno.test("parseDiff: empty string returns empty arrays", async () => {
+  const [changes, errors] = await Effect.runPromise(parseDiff(emptyDiff));
+  assertEquals(changes.length, 0);
+  assertEquals(errors.length, 0);
 });
 
-Deno.test("parseDiff: added file returns correct status and counts", () => {
-  const result = parseDiff(addedFileDiff);
-  assertEquals(result.length, 1);
-  assertEquals(result[0].path, "new.txt");
-  assertEquals(result[0].status, "added");
-  assertEquals(result[0].additions, 2);
-  assertEquals(result[0].deletions, 0);
-  assertExists(result[0].hunks);
-  assertEquals(result[0].hunks.length, 1);
+Deno.test("parseDiff: added file returns correct status and counts", async () => {
+  const [changes, errors] = await Effect.runPromise(parseDiff(addedFileDiff));
+  assertEquals(changes.length, 1);
+  assertEquals(errors.length, 0);
+  assertEquals(changes[0].path, "new.txt");
+  assertEquals(changes[0].status, "added");
+  assertEquals(changes[0].additions, 2);
+  assertEquals(changes[0].deletions, 0);
+  assertExists(changes[0].hunks);
+  assertEquals(changes[0].hunks.length, 1);
 });
 
-Deno.test("parseDiff: modified file returns correct status and counts", () => {
-  const result = parseDiff(modifiedFileDiff);
-  assertEquals(result.length, 1);
-  assertEquals(result[0].path, "modified.txt");
-  assertEquals(result[0].status, "modified");
-  assertEquals(result[0].additions, 1);
-  assertEquals(result[0].deletions, 0);
+Deno.test("parseDiff: modified file returns correct status and counts", async () => {
+  const [changes, errors] = await Effect.runPromise(parseDiff(modifiedFileDiff));
+  assertEquals(changes.length, 1);
+  assertEquals(errors.length, 0);
+  assertEquals(changes[0].path, "modified.txt");
+  assertEquals(changes[0].status, "modified");
+  assertEquals(changes[0].additions, 1);
+  assertEquals(changes[0].deletions, 0);
 });
 
-Deno.test("parseDiff: deleted file returns deleted status", () => {
-  const result = parseDiff(deletedFileDiff);
-  assertEquals(result.length, 1);
-  assertEquals(result[0].path, "deleted.txt");
-  assertEquals(result[0].status, "deleted");
-  assertEquals(result[0].additions, 0);
-  assertEquals(result[0].deletions, 2);
+Deno.test("parseDiff: deleted file returns deleted status", async () => {
+  const [changes, errors] = await Effect.runPromise(parseDiff(deletedFileDiff));
+  assertEquals(changes.length, 1);
+  assertEquals(errors.length, 0);
+  assertEquals(changes[0].path, "deleted.txt");
+  assertEquals(changes[0].status, "deleted");
+  assertEquals(changes[0].additions, 0);
+  assertEquals(changes[0].deletions, 2);
 });
 
-Deno.test("parseDiff: renamed file preserves oldPath", () => {
-  const result = parseDiff(renamedFileDiff);
-  assertEquals(result.length, 1);
-  assertEquals(result[0].path, "new.txt");
-  assertEquals(result[0].oldPath, "old.txt");
-  assertEquals(result[0].status, "renamed");
+Deno.test("parseDiff: renamed file preserves oldPath", async () => {
+  const [changes, errors] = await Effect.runPromise(parseDiff(renamedFileDiff));
+  assertEquals(changes.length, 1);
+  assertEquals(errors.length, 0);
+  assertEquals(changes[0].path, "new.txt");
+  assertEquals(changes[0].oldPath, "old.txt");
+  assertEquals(changes[0].status, "renamed");
 });
 
-Deno.test("parseDiff: binary file detected", () => {
-  const result = parseDiff(binaryFileDiff);
-  assertEquals(result.length, 1);
-  assertEquals(result[0].path, "image.jpg");
-  assertEquals(result[0].binary, true);
+Deno.test("parseDiff: binary file detected", async () => {
+  const [changes, errors] = await Effect.runPromise(parseDiff(binaryFileDiff));
+  assertEquals(changes.length, 1);
+  assertEquals(errors.length, 0);
+  assertEquals(changes[0].path, "image.jpg");
+  assertEquals(changes[0].binary, true);
 });
 
-Deno.test("parseDiff: multiple files returns all", () => {
-  const result = parseDiff(multipleFilesDiff);
-  assertEquals(result.length, 3);
-  assertEquals(result[0].path, "file1.txt");
-  assertEquals(result[0].status, "added");
-  assertEquals(result[1].path, "file2.txt");
-  assertEquals(result[1].status, "modified");
-  assertEquals(result[2].path, "file3.txt");
-  assertEquals(result[2].status, "deleted");
+Deno.test("parseDiff: multiple files returns all", async () => {
+  const [changes, errors] = await Effect.runPromise(parseDiff(multipleFilesDiff));
+  assertEquals(changes.length, 3);
+  assertEquals(errors.length, 0);
+  assertEquals(changes[0].path, "file1.txt");
+  assertEquals(changes[0].status, "added");
+  assertEquals(changes[1].path, "file2.txt");
+  assertEquals(changes[1].status, "modified");
+  assertEquals(changes[2].path, "file3.txt");
+  assertEquals(changes[2].status, "deleted");
 });
 
-Deno.test("parseDiff: handles no newline at EOF", () => {
-  const result = parseDiff(noNewlineDiff);
-  assertEquals(result.length, 1);
-  assertEquals(result[0].path, "noeof.txt");
+Deno.test("parseDiff: handles no newline at EOF", async () => {
+  const [changes, errors] = await Effect.runPromise(parseDiff(noNewlineDiff));
+  assertEquals(changes.length, 1);
+  assertEquals(errors.length, 0);
+  assertEquals(changes[0].path, "noeof.txt");
 });
 
-Deno.test("parseDiff: hunk parsing captures correct line numbers", () => {
-  const result = parseDiff(modifiedFileDiff);
-  const hunk = result[0].hunks[0];
+Deno.test("parseDiff: hunk parsing captures correct line numbers", async () => {
+  const [changes, errors] = await Effect.runPromise(parseDiff(modifiedFileDiff));
+  assertEquals(errors.length, 0);
+  const hunk = changes[0].hunks[0];
   assertEquals(hunk.oldStart, 1);
   assertEquals(hunk.oldLines, 3);
   assertEquals(hunk.newStart, 1);
   assertEquals(hunk.newLines, 4);
 });
 
-Deno.test("parseDiff: unmerged file handled gracefully", () => {
-  const result = parseDiff(unmergedFileDiff);
-  assertEquals(result.length, 1);
-  assertEquals(result[0].path, "conflicted.txt");
+Deno.test("parseDiff: unmerged file handled gracefully", async () => {
+  const [changes, errors] = await Effect.runPromise(parseDiff(unmergedFileDiff));
+  assertEquals(changes.length, 1);
+  assertEquals(changes[0].path, "conflicted.txt");
+});
+
+Deno.test("parseDiff: malformed block collects error", async () => {
+  const [changes, errors] = await Effect.runPromise(parseDiff(malformedDiff));
+  assertEquals(changes.length, 0);
+  assertEquals(errors.length, 1);
+  assertEquals(errors[0] instanceof Error, true);
+});
+
+Deno.test("parseDiff: valid diff parses without errors", async () => {
+  const [changes, errors] = await Effect.runPromise(parseDiff(invalidHunkDiff));
+  assertEquals(changes.length, 1);
+  assertEquals(errors.length, 0);
 });
