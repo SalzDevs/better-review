@@ -21,11 +21,24 @@ var (
 	contextStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#808080")) // Gray
 	cursorStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF00FF")).Bold(true) // Magenta
 
-	sidebarStyle = lipgloss.NewStyle().
+	sidebarStyleActive = lipgloss.NewStyle().
 			Border(lipgloss.NormalBorder(), false, true, false, false).
-			BorderForeground(lipgloss.Color("#444444")).
+			BorderForeground(lipgloss.Color("#00FFFF")). // Cyan
 			PaddingRight(2).
 			MarginRight(2)
+
+	sidebarStyleInactive = lipgloss.NewStyle().
+			Border(lipgloss.NormalBorder(), false, true, false, false).
+			BorderForeground(lipgloss.Color("#444444")). // Gray
+			PaddingRight(2).
+			MarginRight(2)
+)
+
+type focusState int
+
+const (
+	focusSidebar focusState = iota
+	focusViewport
 )
 
 type model struct {
@@ -35,12 +48,14 @@ type model struct {
 	viewport   viewport.Model
 	width      int
 	height     int
+	focus      focusState
 }
 
 func initialModel(files []FileDiff) model {
 	return model{
 		files:      files,
 		cursorFile: 0,
+		focus:      focusSidebar,
 	}
 }
 
@@ -87,7 +102,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 
 		headerHeight := lipgloss.Height(headerStyle.Render("Better Review - Agentic Code Review\n\n"))
-		footerHeight := lipgloss.Height("\nPress up/down to navigate files, j/k to scroll diff, q to quit.")
+		footerHeight := lipgloss.Height("\nPress ↑/↓ to navigate files, Enter to view diff, Esc to return, q to quit.")
 		
 		verticalMarginHeight := headerHeight + footerHeight
 
@@ -104,22 +119,42 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
-		case "up":
-			if m.cursorFile > 0 {
-				m.cursorFile--
-				m.viewport.SetContent(m.renderDiff())
-				m.viewport.GotoTop()
+
+		case "enter", "right":
+			if m.focus == focusSidebar {
+				m.focus = focusViewport
 			}
-		case "down":
-			if m.cursorFile < len(m.files)-1 {
-				m.cursorFile++
-				m.viewport.SetContent(m.renderDiff())
-				m.viewport.GotoTop()
+
+		case "esc", "left":
+			if m.focus == focusViewport {
+				m.focus = focusSidebar
+			}
+
+		case "up", "k":
+			if m.focus == focusSidebar {
+				if m.cursorFile > 0 {
+					m.cursorFile--
+					m.viewport.SetContent(m.renderDiff())
+					m.viewport.GotoTop()
+				}
+			} else if m.focus == focusViewport {
+				m.viewport.LineUp(1)
+			}
+
+		case "down", "j":
+			if m.focus == focusSidebar {
+				if m.cursorFile < len(m.files)-1 {
+					m.cursorFile++
+					m.viewport.SetContent(m.renderDiff())
+					m.viewport.GotoTop()
+				}
+			} else if m.focus == focusViewport {
+				m.viewport.LineDown(1)
 			}
 		}
 	}
 
-	// Route other messages (like j/k/pgup/pgdown) to viewport
+	// Always route commands to viewport to handle things like mouse wheel
 	m.viewport, cmd = m.viewport.Update(msg)
 	cmds = append(cmds, cmd)
 
@@ -142,9 +177,16 @@ func (m model) View() string {
 	for i, f := range m.files {
 		cursor := "  "
 		style := lipgloss.NewStyle().Width(30).MaxWidth(30)
+		
 		if m.cursorFile == i {
-			cursor = "> "
-			style = style.Inherit(cursorStyle)
+			if m.focus == focusSidebar {
+				cursor = "> "
+				style = style.Inherit(cursorStyle)
+			} else {
+				// Focused on viewport, but keep the file highlighted in gray
+				cursor = "  "
+				style = style.Inherit(lipgloss.NewStyle().Foreground(lipgloss.Color("#808080")).Bold(true))
+			}
 		}
 		
 		// Truncate path if too long
@@ -156,13 +198,24 @@ func (m model) View() string {
 		sidebar.WriteString(style.Render(fmt.Sprintf("%s%s", cursor, displayPath)) + "\n")
 	}
 
-	sidebarStr := sidebarStyle.Render(sidebar.String())
+	var sidebarStr string
+	if m.focus == focusSidebar {
+		sidebarStr = sidebarStyleActive.Render(sidebar.String())
+	} else {
+		sidebarStr = sidebarStyleInactive.Render(sidebar.String())
+	}
+	
 	diffView := m.viewport.View()
 
 	// Join them side-by-side
 	mainContent := lipgloss.JoinHorizontal(lipgloss.Top, sidebarStr, diffView)
 
-	footer := lipgloss.NewStyle().Foreground(lipgloss.Color("#808080")).Render("\nPress ↑/↓ to navigate files, j/k to scroll diff, q to quit.")
+	footerText := " [Sidebar] ↑/↓: change file | Enter: review file | q: quit"
+	if m.focus == focusViewport {
+		footerText = " [Reviewing] ↑/↓: scroll file | Esc: back to file list | q: quit"
+	}
+	
+	footer := lipgloss.NewStyle().Foreground(lipgloss.Color("#808080")).Render("\n" + footerText)
 
 	return fmt.Sprintf("%s\n%s\n%s", header, mainContent, footer)
 }
