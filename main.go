@@ -6,8 +6,6 @@ import (
 	"log"
 	"os"
 	"os/exec"
-
-	tea "github.com/charmbracelet/bubbletea"
 )
 
 type FileStatus string
@@ -54,28 +52,14 @@ func CollectGitDiff(ctx context.Context, repoPath string) (string, error) {
 }
 
 func main() {
-	cwd, err := os.Getwd()
-	if err != nil {
-		log.Fatalf("Failed to get current working directory: %v", err)
-	}
-
-	diff, err := CollectGitDiff(context.Background(), cwd)
-	if err != nil {
-		log.Fatalf("Error collecting git diff: %v", err)
-	}
-
-	if diff == "" {
-		fmt.Println("No uncommitted changes found.")
+	if len(os.Args) > 1 && os.Args[1] == "opencode" {
+		if err := runProxy(os.Args[1:]); err != nil {
+			log.Fatalf("Proxy error: %v", err)
+		}
 		return
 	}
 
-	parsedFiles, err := ParseGitDiff(diff)
-	if err != nil {
-		log.Fatalf("Error parsing git diff: %v", err)
-	}
-
-	p := tea.NewProgram(initialModel(parsedFiles))
-	if _, err := p.Run(); err != nil {
-		log.Fatalf("Error running review TUI: %v", err)
+	if err := runReview(); err != nil {
+		log.Fatalf("Error: %v", err)
 	}
 }
