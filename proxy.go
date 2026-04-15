@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -46,9 +45,18 @@ func runProxy(args []string) error {
 	// We print a nice header
 	os.Stdout.Write([]byte("\r\n\033[36m[Better Review] Proxy active. Press \033[1mCtrl+O\033[0m\033[36m at any time to review uncommitted code changes.\033[0m\r\n\n"))
 
-	// Copy stdout
+	// Copy stdout manually with a 4096 byte buffer for snappy rendering
 	go func() {
-		_, _ = io.Copy(os.Stdout, ptmx)
+		bufOut := make([]byte, 4096)
+		for {
+			n, err := ptmx.Read(bufOut)
+			if n > 0 {
+				_, _ = os.Stdout.Write(bufOut[:n])
+			}
+			if err != nil {
+				break
+			}
+		}
 	}()
 
 	// Handle exit
@@ -81,19 +89,9 @@ func runProxy(args []string) error {
 					_, _ = ptmx.Write(buf[:ctrlOIndex])
 				}
 
-				// Restore terminal to normal mode for the UI
-				term.Restore(int(os.Stdin.Fd()), oldState)
-
-				// Run the review
+				// Run the review inline. Bubble Tea (in runReview) will handle
+				// its own terminal state and AltScreen properly.
 				_ = runReview()
-
-				// Give the terminal back to raw mode for opencode
-				oldState, _ = term.MakeRaw(int(os.Stdin.Fd()))
-
-				// Force a redraw in opencode by simulating a window resize
-				// and injecting a Ctrl+L (Clear Screen / Redraw) to be safe
-				ch <- syscall.SIGWINCH
-				_, _ = ptmx.Write([]byte{0x0C}) // Send Ctrl+L to trigger a prompt redraw
 
 				// Write anything after Ctrl+O
 				if ctrlOIndex+1 < n {
