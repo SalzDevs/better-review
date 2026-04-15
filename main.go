@@ -6,6 +6,8 @@ import (
 	"log"
 	"os"
 	"os/exec"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 type FileStatus string
@@ -70,11 +72,8 @@ func main() {
 		log.Fatalf("Error parsing git diff: %v", err)
 	}
 
-	fmt.Printf("Found %d changed files.\n", len(parsedFiles))
-	for _, f := range parsedFiles {
-		fmt.Printf("- %s (Hunks: %d)\n", f.NewPath, len(f.Hunks))
-		for _, h := range f.Hunks {
-			fmt.Printf("  - %s (%d lines)\n", h.Header, len(h.Lines))
-		}
+	p := tea.NewProgram(initialModel(parsedFiles))
+	if _, err := p.Run(); err != nil {
+		log.Fatalf("Error running review TUI: %v", err)
 	}
 }
