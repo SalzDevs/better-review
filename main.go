@@ -65,7 +65,16 @@ func main() {
 		return
 	}
 
-	fmt.Println("Raw Git Diff Output:")
-	fmt.Println("--------------------")
-	fmt.Println(diff)
+	parsedFiles, err := ParseGitDiff(diff)
+	if err != nil {
+		log.Fatalf("Error parsing git diff: %v", err)
+	}
+
+	fmt.Printf("Found %d changed files.\n", len(parsedFiles))
+	for _, f := range parsedFiles {
+		fmt.Printf("- %s (Hunks: %d)\n", f.NewPath, len(f.Hunks))
+		for _, h := range f.Hunks {
+			fmt.Printf("  - %s (%d lines)\n", h.Header, len(h.Lines))
+		}
+	}
 }
