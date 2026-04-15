@@ -15,23 +15,23 @@ func init() {
 }
 
 var (
-	addedStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#00FF00")) // Green
-	removedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF0000")) // Red
+	addedStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#00FF00"))            // Green
+	removedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF0000"))            // Red
 	headerStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#00FFFF")) // Cyan
-	contextStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#808080")) // Gray
+	contextStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#808080"))            // Gray
 	cursorStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF00FF")).Bold(true) // Magenta
 
 	sidebarStyleActive = lipgloss.NewStyle().
-			Border(lipgloss.NormalBorder(), false, true, false, false).
-			BorderForeground(lipgloss.Color("#00FFFF")). // Cyan
-			PaddingRight(2).
-			MarginRight(2)
+				Border(lipgloss.NormalBorder(), false, true, false, false).
+				BorderForeground(lipgloss.Color("#00FFFF")). // Cyan
+				PaddingRight(2).
+				MarginRight(2)
 
 	sidebarStyleInactive = lipgloss.NewStyle().
-			Border(lipgloss.NormalBorder(), false, true, false, false).
-			BorderForeground(lipgloss.Color("#444444")). // Gray
-			PaddingRight(2).
-			MarginRight(2)
+				Border(lipgloss.NormalBorder(), false, true, false, false).
+				BorderForeground(lipgloss.Color("#444444")). // Gray
+				PaddingRight(2).
+				MarginRight(2)
 )
 
 type focusState int
@@ -69,7 +69,7 @@ func (m *model) renderDiff() string {
 	}
 	var s strings.Builder
 	currFile := m.files[m.cursorFile]
-	
+
 	s.WriteString(headerStyle.Render(fmt.Sprintf("--- a/%s\n+++ b/%s\n\n", currFile.OldPath, currFile.NewPath)))
 
 	for _, hunk := range currFile.Hunks {
@@ -78,11 +78,11 @@ func (m *model) renderDiff() string {
 			content := line.Content
 			switch line.Kind {
 			case "add":
-				s.WriteString(addedStyle.Render("+" + content) + "\n")
+				s.WriteString(addedStyle.Render("+"+content) + "\n")
 			case "remove":
-				s.WriteString(removedStyle.Render("-" + content) + "\n")
+				s.WriteString(removedStyle.Render("-"+content) + "\n")
 			default:
-				s.WriteString(contextStyle.Render(" " + content) + "\n")
+				s.WriteString(contextStyle.Render(" "+content) + "\n")
 			}
 		}
 		s.WriteString("\n")
@@ -103,7 +103,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		headerHeight := lipgloss.Height(headerStyle.Render("Better Review - Agentic Code Review\n\n"))
 		footerHeight := lipgloss.Height("\nPress ↑/↓ to navigate files, Enter to view diff, Esc to return, q to quit.")
-		
+
 		verticalMarginHeight := headerHeight + footerHeight
 
 		if !m.ready {
@@ -177,7 +177,7 @@ func (m model) View() string {
 	for i, f := range m.files {
 		cursor := "  "
 		style := lipgloss.NewStyle().Width(30).MaxWidth(30)
-		
+
 		if m.cursorFile == i {
 			if m.focus == focusSidebar {
 				cursor = "> "
@@ -188,13 +188,13 @@ func (m model) View() string {
 				style = style.Inherit(lipgloss.NewStyle().Foreground(lipgloss.Color("#808080")).Bold(true))
 			}
 		}
-		
+
 		// Truncate path if too long
 		displayPath := f.NewPath
 		if len(displayPath) > 28 {
 			displayPath = "..." + displayPath[len(displayPath)-25:]
 		}
-		
+
 		sidebar.WriteString(style.Render(fmt.Sprintf("%s%s", cursor, displayPath)) + "\n")
 	}
 
@@ -204,7 +204,7 @@ func (m model) View() string {
 	} else {
 		sidebarStr = sidebarStyleInactive.Render(sidebar.String())
 	}
-	
+
 	diffView := m.viewport.View()
 
 	// Join them side-by-side
@@ -214,7 +214,7 @@ func (m model) View() string {
 	if m.focus == focusViewport {
 		footerText = " [Reviewing] ↑/↓: scroll file | Esc: back to file list | q: quit"
 	}
-	
+
 	footer := lipgloss.NewStyle().Foreground(lipgloss.Color("#808080")).Render("\n" + footerText)
 
 	return fmt.Sprintf("%s\n%s\n%s", header, mainContent, footer)
