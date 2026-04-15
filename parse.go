@@ -12,6 +12,7 @@ func ParseGitDiff(diff string) ([]FileDiff, error) {
 	var files []FileDiff
 	var currentFile *FileDiff
 	var currentHunk *Hunk
+	var currentOldLine, currentNewLine int
 
 	lines := strings.Split(diff, "\n")
 
@@ -29,6 +30,16 @@ func ParseGitDiff(diff string) ([]FileDiff, error) {
 			if len(parts) == 4 {
 				currentFile.OldPath = strings.TrimPrefix(parts[2], "a/")
 				currentFile.NewPath = strings.TrimPrefix(parts[3], "b/")
+
+				if parts[2] == "/dev/null" {
+					currentFile.Status = "added"
+					currentFile.OldPath = ""
+				} else if parts[3] == "/dev/null" {
+					currentFile.Status = "deleted"
+					currentFile.NewPath = ""
+				} else {
+					currentFile.Status = "modified"
+				}
 			}
 			continue
 		}
@@ -66,6 +77,8 @@ func ParseGitDiff(diff string) ([]FileDiff, error) {
 					NewCount: newCount,
 					Lines:    []DiffLine{},
 				}
+				currentOldLine = oldStart
+				currentNewLine = newStart
 			}
 			continue
 		}
@@ -81,19 +94,32 @@ func ParseGitDiff(diff string) ([]FileDiff, error) {
 			}
 
 			kind := ""
+			oldL := 0
+			newL := 0
+
 			switch prefix {
 			case "+":
 				kind = "add"
+				newL = currentNewLine
+				currentNewLine++
 			case "-":
 				kind = "remove"
+				oldL = currentOldLine
+				currentOldLine++
 			case " ":
 				kind = "context"
+				oldL = currentOldLine
+				newL = currentNewLine
+				currentOldLine++
+				currentNewLine++
 			}
 
 			if kind != "" {
 				currentHunk.Lines = append(currentHunk.Lines, DiffLine{
 					Kind:    kind,
 					Content: content,
+					OldLine: oldL,
+					NewLine: newL,
 				})
 			}
 		}

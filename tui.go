@@ -23,6 +23,14 @@ var (
 	contextStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#8b949e"))                                                                      // Dimmer Gray
 	contextPrefixStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#484f58"))                                                                      // Very dim gray for ' '
 
+	gutterStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#484f58")).PaddingRight(1) // Line numbers
+	gutterAddStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#2ea043")).PaddingRight(1) // Added line numbers
+	gutterRemoveStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#da3633")).PaddingRight(1) // Removed line numbers
+
+	badgeAddStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#3fb950")).Bold(true) // Green [A]
+	badgeModStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#58a6ff")).Bold(true) // Blue [M]
+	badgeDelStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#f85149")).Bold(true) // Red [D]
+
 	activeItemStyle = lipgloss.NewStyle().
 			Background(lipgloss.Color("#21262d")). // GitHub Dark Active Row
 			Foreground(lipgloss.Color("#c9d1d9")). // GitHub Dark Text
@@ -90,14 +98,25 @@ func (m *model) renderDiff() string {
 		// Render hunk header as a subtle block
 		s.WriteString("\n" + headerStyle.Render(hunk.Header) + "\n")
 		for _, line := range hunk.Lines {
+
+			oldLineStr := "    "
+			if line.OldLine > 0 {
+				oldLineStr = fmt.Sprintf("%4d", line.OldLine)
+			}
+
+			newLineStr := "    "
+			if line.NewLine > 0 {
+				newLineStr = fmt.Sprintf("%4d", line.NewLine)
+			}
+
 			content := line.Content
 			switch line.Kind {
 			case "add":
-				s.WriteString(addedPrefixStyle.Render("+ ") + addedStyle.Render(content) + "\n")
+				s.WriteString(gutterStyle.Render(oldLineStr) + gutterAddStyle.Render(newLineStr) + addedPrefixStyle.Render("+ ") + addedStyle.Render(content) + "\n")
 			case "remove":
-				s.WriteString(removedPrefixStyle.Render("- ") + removedStyle.Render(content) + "\n")
+				s.WriteString(gutterRemoveStyle.Render(oldLineStr) + gutterStyle.Render(newLineStr) + removedPrefixStyle.Render("- ") + removedStyle.Render(content) + "\n")
 			default:
-				s.WriteString(contextPrefixStyle.Render("  ") + contextStyle.Render(content) + "\n")
+				s.WriteString(gutterStyle.Render(oldLineStr) + gutterStyle.Render(newLineStr) + contextPrefixStyle.Render("  ") + contextStyle.Render(content) + "\n")
 			}
 		}
 	}
@@ -116,7 +135,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 
 		footerHeight := lipgloss.Height("\nPress ↑/↓ to navigate files, Enter to view diff, Esc to return, q to quit.")
-		verticalMarginHeight := footerHeight + 1 // Add 1 for the gap
+		verticalMarginHeight := footerHeight + 3 // Add 1 for gap, 2 for diff header
 
 		if !m.ready {
 			m.viewport = viewport.New(m.width-35, m.height-verticalMarginHeight) // Assumes 35 chars for sidebar
@@ -200,13 +219,25 @@ func (m model) View() string {
 			}
 		}
 
-		// Truncate path if too long
-		displayPath := f.NewPath
-		if len(displayPath) > 28 {
-			displayPath = "..." + displayPath[len(displayPath)-25:]
+		// Badges based on Git Status
+		badge := badgeModStyle.Render(" M ")
+		if f.Status == "added" {
+			badge = badgeAddStyle.Render(" + ")
+		} else if f.Status == "deleted" {
+			badge = badgeDelStyle.Render(" - ")
 		}
 
-		sidebar.WriteString(style.Render(displayPath) + "\n")
+		displayPath := f.NewPath
+		if displayPath == "" {
+			displayPath = f.OldPath
+		}
+
+		// Truncate path if too long, leaving room for badge
+		if len(displayPath) > 24 {
+			displayPath = "..." + displayPath[len(displayPath)-21:]
+		}
+
+		sidebar.WriteString(style.Render(badge+displayPath) + "\n")
 	}
 
 	var sidebarStr string
@@ -216,7 +247,23 @@ func (m model) View() string {
 		sidebarStr = sidebarStyleInactive.Render(sidebar.String())
 	}
 
-	diffView := m.viewport.View()
+	// Diff Pane Title (Sticky)
+	currFile := m.files[m.cursorFile]
+	titlePath := currFile.NewPath
+	if titlePath == "" {
+		titlePath = currFile.OldPath
+	}
+
+	scrollPercent := m.viewport.ScrollPercent()
+	scrollText := fmt.Sprintf("  —  %3.0f%%", scrollPercent*100)
+	if scrollPercent < 0 {
+		scrollText = "  —    0%"
+	}
+
+	diffTitle := lipgloss.NewStyle().Foreground(lipgloss.Color("#c9d1d9")).Bold(true).PaddingLeft(1).Render(titlePath) +
+		lipgloss.NewStyle().Foreground(lipgloss.Color("#8b949e")).Render(scrollText) + "\n\n"
+
+	diffView := diffTitle + m.viewport.View()
 
 	// Join them side-by-side
 	mainContent := lipgloss.JoinHorizontal(lipgloss.Top, sidebarStr, diffView)
