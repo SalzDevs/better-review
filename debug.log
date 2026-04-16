@@ -1,2 +1,1 @@
-00:25:44.311319 app.go:633: Logger initialized
-00:25:53.604387 app.go:473: run 1 completed command "opencode run" (stdout=1164 bytes, stderr=0 bytes)
+00:41:25.394524 app.go:951: Logger initialized

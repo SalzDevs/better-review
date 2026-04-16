@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -40,6 +41,7 @@ type FileDiff struct {
 
 func main() {
 	opencodeFlag := flag.String("opencode-bin", "", "path to the opencode binary")
+	modelFlag := flag.String("model", "", "default opencode model in provider/model format")
 	flag.Parse()
 
 	if err := initLogger(); err != nil {
@@ -53,8 +55,8 @@ func main() {
 		log.Fatalf("Error: %v", err)
 	}
 
-	runner := NewOpencodeRunner(cwd, *opencodeFlag)
-	p := tea.NewProgram(newAppModel(cwd, runner), tea.WithAltScreen())
+	runner := NewOpencodeRunner(cwd, *opencodeFlag, *modelFlag)
+	p := tea.NewProgram(newAppModel(cwd, runner, strings.TrimSpace(*modelFlag)), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		log.Fatalf("Error: %v", err)
 	}

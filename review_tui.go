@@ -299,7 +299,13 @@ func (m reviewModel) View() string {
 	}
 
 	if len(m.files) == 0 {
-		return "\nNo changes available.\nPress Esc to return."
+		empty := lipgloss.JoinVertical(lipgloss.Left,
+			heroStyle.Render("No code changes yet"),
+			"",
+			subtleStyle.Render("Press Ctrl+O to open the centered composer and send a new instruction to opencode."),
+			subtleStyle.Render("When a run finishes, its diff will appear here automatically."),
+		)
+		return "\n" + empty
 	}
 
 	var sidebar strings.Builder
@@ -362,9 +368,9 @@ func (m reviewModel) View() string {
 		modeStyle = statusBusyStyle
 	}
 
-	footerText := "Enter: open diff | y: accept | x: reject | u: undo | Esc: return"
+	footerText := "Ctrl+O: prompt | Enter: open diff | y: accept | x: reject | u: undo"
 	if m.focus == focusViewport {
-		footerText = "Tab: next hunk | y: accept hunk | x: reject hunk | Esc: files"
+		footerText = "Ctrl+O: prompt | Tab: next hunk | y: accept hunk | x: reject hunk | Esc: files"
 	}
 	footer := lipgloss.JoinHorizontal(lipgloss.Top, modeStyle.Render(modeStr), subtleStyle.Render(" "+footerText))
 

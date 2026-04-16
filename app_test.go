@@ -93,6 +93,41 @@ func TestRejectFileRemovesAddedFile(t *testing.T) {
 	}
 }
 
+func TestParseModelOptionsExtractsVariants(t *testing.T) {
+	raw := strings.TrimSpace(`openai/gpt-5.4
+{
+  "id": "gpt-5.4",
+  "providerID": "openai",
+  "variants": {
+    "low": {
+      "reasoningEffort": "low"
+    },
+    "high": {
+      "reasoningEffort": "high"
+    }
+  }
+}
+
+github-copilot/gpt-5.1-codex
+{
+  "id": "gpt-5.1-codex",
+  "providerID": "github-copilot",
+  "variants": {}
+}`)
+
+	models := parseModelOptions(raw)
+	if len(models) != 2 {
+		t.Fatalf("expected 2 models, got %d", len(models))
+	}
+
+	if models[1].ID != "openai/gpt-5.4" {
+		t.Fatalf("expected sorted openai model last, got %q", models[1].ID)
+	}
+	if strings.Join(models[1].Variants, ",") != "high,low" {
+		t.Fatalf("expected extracted variants, got %v", models[1].Variants)
+	}
+}
+
 func initTestRepo(t *testing.T) string {
 	t.Helper()
 	repoPath := t.TempDir()
