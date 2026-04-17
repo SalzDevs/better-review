@@ -14,7 +14,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use tokio::sync::mpsc;
 use tui_textarea::TextArea;
 
@@ -565,7 +565,8 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                 }),
             ),
     );
-    frame.render_widget(sidebar, sections[0]);
+    let mut sidebar_state = ListState::default().with_selected(Some(app.review.cursor_file));
+    frame.render_stateful_widget(sidebar, sections[0], &mut sidebar_state);
 
     let mut diff_lines = vec![Line::from(vec![
         Span::styled(
@@ -706,6 +707,7 @@ fn draw_model_picker(
 
     let models = filtered_models(&app.models, matcher, &search.lines().join("\n"));
     let mut rows = Vec::new();
+    let mut selected_row = None;
     let mut last_provider = String::new();
     for (index, model) in models.iter().enumerate() {
         if model.provider != last_provider {
@@ -717,6 +719,10 @@ fn draw_model_picker(
                 styles::subtle(),
             ))));
             last_provider = model.provider.clone();
+        }
+        let row_index = rows.len();
+        if index == model_cursor {
+            selected_row = Some(row_index);
         }
         let style = if index == model_cursor {
             Style::default()
@@ -748,7 +754,8 @@ fn draw_model_picker(
         rows.push(ListItem::new(Line::from(spans)));
     }
 
-    frame.render_widget(List::new(rows), sections[1]);
+    let mut model_list_state = ListState::default().with_selected(selected_row);
+    frame.render_stateful_widget(List::new(rows), sections[1], &mut model_list_state);
     frame.render_widget(
         Paragraph::new("Enter select   Esc back").style(styles::muted()),
         sections[2],
