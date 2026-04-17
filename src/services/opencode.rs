@@ -110,21 +110,14 @@ impl OpencodeService {
 pub fn parse_model_options(raw: &str) -> Vec<ModelOption> {
     let mut options = Vec::new();
 
-    for chunk in raw.trim().split("\n\n") {
-        let chunk = chunk.trim();
-        if chunk.is_empty() {
+    let mut lines = raw.lines().peekable();
+    while let Some(line) = lines.next() {
+        let id = line.trim();
+        if !looks_like_model_id(id) {
             continue;
         }
 
-        let mut lines = chunk.lines();
-        let Some(id) = lines
-            .next()
-            .map(str::trim)
-            .filter(|line| line.contains('/'))
-        else {
-            continue;
-        };
-        let body = lines.collect::<Vec<_>>().join("\n");
+        let body = collect_json_block(&mut lines);
         let payload: ModelPayload = serde_json::from_str(&body).unwrap_or_default();
         let (provider, name) = split_model_id(id);
 
@@ -140,6 +133,62 @@ pub fn parse_model_options(raw: &str) -> Vec<ModelOption> {
 
     options.sort_by(|a, b| a.provider.cmp(&b.provider).then(a.name.cmp(&b.name)));
     options
+}
+
+fn looks_like_model_id(line: &str) -> bool {
+    line.contains('/') && !line.contains('{') && !line.contains('}')
+}
+
+fn collect_json_block<'a, I>(lines: &mut std::iter::Peekable<I>) -> String
+where
+    I: Iterator<Item = &'a str>,
+{
+    while matches!(lines.peek(), Some(line) if line.trim().is_empty()) {
+        lines.next();
+    }
+
+    let mut body = String::new();
+    let mut depth = 0_i32;
+    let mut started = false;
+
+    while let Some(line) = lines.peek().copied() {
+        let trimmed = line.trim();
+
+        if !started {
+            if trimmed.is_empty() {
+                lines.next();
+                continue;
+            }
+            if !trimmed.starts_with('{') {
+                break;
+            }
+        } else if depth == 0 && looks_like_model_id(trimmed) {
+            break;
+        }
+
+        let line = lines.next().unwrap_or_default();
+        if !body.is_empty() {
+            body.push('\n');
+        }
+        body.push_str(line);
+
+        for ch in line.chars() {
+            match ch {
+                '{' => {
+                    depth += 1;
+                    started = true;
+                }
+                '}' => depth -= 1,
+                _ => {}
+            }
+        }
+
+        if started && depth <= 0 {
+            break;
+        }
+    }
+
+    body
 }
 
 fn split_model_id(id: &str) -> (String, String) {
@@ -178,5 +227,37 @@ github-copilot/gpt-5.1-codex
         assert_eq!(models.len(), 2);
         assert_eq!(models[1].id, "openai/gpt-5.4");
         assert_eq!(models[1].variants, vec!["high", "low"]);
+    }
+
+    #[test]
+    fn parses_contiguous_verbose_catalog_without_blank_lines() {
+        let raw = r#"opencode/big-pickle
+{
+  "variants": {
+    "high": {},
+    "max": {}
+  }
+}
+github-copilot/gpt-5.4
+{
+  "variants": {
+    "low": {},
+    "medium": {},
+    "high": {}
+  }
+}
+openai/gpt-5.4-mini
+{
+  "variants": {}
+}"#;
+
+        let models = parse_model_options(raw);
+        assert_eq!(models.len(), 3);
+        assert_eq!(models[0].id, "github-copilot/gpt-5.4");
+        assert_eq!(models[0].variants, vec!["high", "low", "medium"]);
+        assert_eq!(models[1].id, "openai/gpt-5.4-mini");
+        assert!(models[1].variants.is_empty());
+        assert_eq!(models[2].id, "opencode/big-pickle");
+        assert_eq!(models[2].variants, vec!["high", "max"]);
     }
 }
