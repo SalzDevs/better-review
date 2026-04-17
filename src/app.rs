@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -21,7 +21,7 @@ use tui_textarea::TextArea;
 use crate::domain::diff::{DiffLineKind, FileDiff, ReviewStatus};
 use crate::domain::model_catalog::ModelOption;
 use crate::domain::session::WorkspaceSnapshot;
-use crate::services::git::{GitService, patch_from_hunk};
+use crate::services::git::GitService;
 use crate::services::opencode::{OpencodeService, RunResult};
 use crate::ui::styles;
 
@@ -53,6 +53,7 @@ struct App {
     selected_model: Option<String>,
     selected_variant: Option<String>,
     session_snapshot: Option<WorkspaceSnapshot>,
+    review_busy: bool,
     tx: mpsc::UnboundedSender<Message>,
     rx: mpsc::UnboundedReceiver<Message>,
 }
@@ -91,6 +92,13 @@ enum ReviewFocus {
 enum Message {
     ModelsLoaded(Result<Vec<ModelOption>, String>),
     PromptFinished(Result<RunResult, String>),
+    HunkSyncFinished {
+        file_index: usize,
+        original_file: FileDiff,
+        updated_file: FileDiff,
+        success_status: String,
+        result: Result<(), String>,
+    },
 }
 
 impl App {
@@ -111,6 +119,7 @@ impl App {
             selected_model: None,
             selected_variant: None,
             session_snapshot: None,
+            review_busy: false,
             tx,
             rx,
         };
@@ -153,12 +162,6 @@ impl App {
         self.review.files.get(self.review.cursor_file).map(FileDiff::display_path)
     }
 
-    fn current_snapshot(&self) -> Result<&WorkspaceSnapshot> {
-        self.session_snapshot
-            .as_ref()
-            .context("review session snapshot is unavailable")
-    }
-
     fn current_file_has_protected_unstaged_content(&self) -> bool {
         let Some(path) = self.current_file_path() else {
             return false;
@@ -198,26 +201,13 @@ impl App {
         counts
     }
 
-    async fn open_commit_prompt(&mut self) -> Result<TextArea<'static>> {
-        let snapshot = self.current_snapshot()?;
-        if snapshot.had_staged_changes {
-            self.status =
-                "Cannot commit from better-review because the session started with unrelated staged changes."
-                    .to_string();
-            anyhow::bail!("preexisting staged changes block in-app commit");
-        }
-
-        if !self.git.has_staged_changes().await? {
-            self.status = "No accepted changes are staged yet.".to_string();
-            anyhow::bail!("no staged changes to commit");
-        }
-
+    fn open_commit_prompt(&mut self) -> TextArea<'static> {
         self.overlay = Overlay::CommitPrompt;
         self.status = "Write a commit message for the accepted changes.".to_string();
 
         let mut commit_message = TextArea::default();
         commit_message.set_placeholder_text("Write the commit message for accepted changes");
-        Ok(commit_message)
+        commit_message
     }
 }
 
@@ -291,6 +281,27 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                         app.overlay = Overlay::None;
                     }
                 },
+                Message::HunkSyncFinished {
+                    file_index,
+                    original_file,
+                    updated_file,
+                    success_status,
+                    result,
+                } => {
+                    app.review_busy = false;
+                    if let Some(file) = app.review.files.get_mut(file_index) {
+                        match result {
+                            Ok(()) => {
+                                *file = updated_file;
+                                app.status = success_status;
+                            }
+                            Err(err) => {
+                                *file = original_file;
+                                app.status = err;
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -407,6 +418,22 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                                 continue;
                             }
 
+                            if !app.git.has_staged_changes().await? {
+                                app.status = "No accepted changes are staged yet.".to_string();
+                                continue;
+                            }
+
+                            if app
+                                .session_snapshot
+                                .as_ref()
+                                .is_some_and(|snapshot| snapshot.had_staged_changes)
+                            {
+                                app.status =
+                                    "Cannot commit from better-review because the session started with unrelated staged changes."
+                                        .to_string();
+                                continue;
+                            }
+
                             app.git.commit_staged(&message).await?;
                             let (_, files) = if let Some(snapshot) = app.session_snapshot.as_ref() {
                                 app.git.collect_session_diff(snapshot).await?
@@ -437,8 +464,10 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                         }
 
                         if key.code == KeyCode::Char('c') {
-                            if let Ok(new_commit_message) = app.open_commit_prompt().await {
-                                commit_message = new_commit_message;
+                            if app.review_busy {
+                                app.status = "Wait for the current review update to finish.".to_string();
+                            } else {
+                                commit_message = app.open_commit_prompt();
                             }
                             continue;
                         }
@@ -455,6 +484,14 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
 
 async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
     if app.review.files.is_empty() {
+        return Ok(());
+    }
+
+    if app.review_busy {
+        match key.code {
+            KeyCode::Esc => app.review.focus = ReviewFocus::Files,
+            _ => app.status = "Updating review state...".to_string(),
+        }
         return Ok(());
     }
 
@@ -499,46 +536,97 @@ async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
                     return Ok(());
                 }
                 if let Some(file) = app.review.files.get_mut(app.review.cursor_file) {
-                    app.git.accept_file(file).await?;
-                    app.status = "Accepted file changes.".to_string();
+                    match app.git.accept_file(file).await {
+                        Ok(()) => app.status = "Accepted file changes.".to_string(),
+                        Err(err) => app.status = format!("Could not accept file: {err}"),
+                    }
                 }
             } else if let Some(file) = app.review.files.get_mut(app.review.cursor_file) {
-                if let Some(hunk) = file.hunks.get(app.review.cursor_hunk).cloned() {
-                    let patch = patch_from_hunk(file, &hunk);
-                    app.git.apply_patch_to_index(&patch).await?;
+                if file.hunks.get(app.review.cursor_hunk).is_some() {
+                    let file_index = app.review.cursor_file;
+                    let original_file = file.clone();
+                    let mut updated_file = file.clone();
+                    updated_file.hunks[app.review.cursor_hunk].review_status = ReviewStatus::Accepted;
+                    updated_file.sync_review_status();
 
-                    let hunk = &mut file.hunks[app.review.cursor_hunk];
-                    hunk.review_status = ReviewStatus::Accepted;
-                    file.sync_review_status();
-                    app.status = "Accepted hunk.".to_string();
+                    let tx = app.tx.clone();
+                    let git = app.git.clone();
+                    let snapshot = app.session_snapshot.clone();
+                    app.review_busy = true;
+                    app.status = "Applying accepted hunk...".to_string();
+
+                    tokio::spawn(async move {
+                        let result = git
+                            .sync_file_hunks_to_index(&updated_file, snapshot.as_ref())
+                            .await
+                            .map_err(|err| format!("Could not accept hunk: {err}"));
+                        let _ = tx.send(Message::HunkSyncFinished {
+                            file_index,
+                            original_file,
+                            updated_file,
+                            success_status: "Accepted hunk.".to_string(),
+                            result,
+                        });
+                    });
                 }
             }
         }
         KeyCode::Char('x') => {
-            let snapshot = app.current_snapshot()?.clone();
             if app.review.focus == ReviewFocus::Files {
                 if let Some(file) = app.review.files.get_mut(app.review.cursor_file) {
-                    app.git.reject_file(file, &snapshot).await?;
-                    app.status = "Rejected file changes.".to_string();
+                    let result = if let Some(snapshot) = app.session_snapshot.as_ref() {
+                        app.git.reject_file(file, snapshot).await
+                    } else {
+                        app.git.reject_file_in_place(file).await
+                    };
+
+                    match result {
+                        Ok(()) => app.status = "Rejected file changes.".to_string(),
+                        Err(err) => app.status = format!("Could not reject file: {err}"),
+                    }
                 }
             } else if let Some(file) = app.review.files.get_mut(app.review.cursor_file) {
-                if let Some(hunk) = file.hunks.get(app.review.cursor_hunk).cloned() {
-                    let patch = patch_from_hunk(file, &hunk);
-                    app.git.reverse_apply_patch(&patch).await?;
-                    app.git.reverse_apply_patch_to_index(&patch).await?;
+                if file.hunks.get(app.review.cursor_hunk).is_some() {
+                    let file_index = app.review.cursor_file;
+                    let original_file = file.clone();
+                    let mut updated_file = file.clone();
+                    updated_file.hunks[app.review.cursor_hunk].review_status = ReviewStatus::Rejected;
+                    updated_file.sync_review_status();
 
-                    let hunk = &mut file.hunks[app.review.cursor_hunk];
-                    hunk.review_status = ReviewStatus::Rejected;
-                    file.sync_review_status();
-                    app.status = "Rejected hunk.".to_string();
+                    let tx = app.tx.clone();
+                    let git = app.git.clone();
+                    let snapshot = app.session_snapshot.clone();
+                    app.review_busy = true;
+                    app.status = "Rejecting hunk...".to_string();
+
+                    tokio::spawn(async move {
+                        let result = git
+                            .sync_file_hunks_to_index(&updated_file, snapshot.as_ref())
+                            .await
+                            .map_err(|err| format!("Could not reject hunk: {err}"));
+                        let _ = tx.send(Message::HunkSyncFinished {
+                            file_index,
+                            original_file,
+                            updated_file,
+                            success_status: "Rejected hunk.".to_string(),
+                            result,
+                        });
+                    });
                 }
             }
         }
         KeyCode::Char('u') => {
-            let snapshot = app.current_snapshot()?.clone();
             if let Some(file) = app.review.files.get_mut(app.review.cursor_file) {
-                app.git.unstage_file(file, &snapshot).await?;
-                app.status = "Moved file back to unreviewed.".to_string();
+                let result = if let Some(snapshot) = app.session_snapshot.as_ref() {
+                    app.git.unstage_file(file, snapshot).await
+                } else {
+                    app.git.unstage_file_in_place(file).await
+                };
+
+                match result {
+                    Ok(()) => app.status = "Moved file back to unreviewed.".to_string(),
+                    Err(err) => app.status = format!("Could not unstage file: {err}"),
+                }
             }
         }
         _ => {}
@@ -604,6 +692,23 @@ fn draw_top_bar(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         ),
     };
 
+    let review_state = if app.review_busy {
+        Span::styled(
+            "SYNCING",
+            Style::default()
+                .fg(styles::BASE_BG)
+                .bg(styles::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled(
+            "IDLE",
+            Style::default()
+                .fg(styles::TEXT_PRIMARY)
+                .bg(styles::SURFACE_RAISED),
+        )
+    };
+
     let counts = app.review_counts();
 
     let lines = vec![
@@ -622,6 +727,8 @@ fn draw_top_bar(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             Span::styled(app.current_model_label(), styles::title()),
             Span::raw("   "),
             status,
+            Span::raw("   "),
+            review_state,
             Span::raw("   "),
             Span::styled(app.review_context_label(), styles::muted()),
         ]),
@@ -911,7 +1018,7 @@ fn draw_commit_prompt(
         lines[0],
     );
     frame.render_widget(
-        Paragraph::new("Enter commit   Esc close").style(styles::muted()),
+        Paragraph::new("Commit prompt active  |  Enter commit  |  Esc close").style(styles::muted()),
         lines[1],
     );
     frame.render_widget(commit_message, lines[2]);

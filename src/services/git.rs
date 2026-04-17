@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
+use tokio::time::{Duration, timeout};
 use tokio::process::Command;
 
 use crate::domain::diff::{FileDiff, ReviewStatus};
@@ -9,6 +10,7 @@ use crate::domain::session::WorkspaceSnapshot;
 use crate::services::parser::parse_git_diff;
 
 const EMPTY_TREE_HASH: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone)]
 pub struct GitService {
@@ -67,8 +69,22 @@ impl GitService {
         snapshot: &WorkspaceSnapshot,
     ) -> Result<()> {
         let path = display_path(file);
-        self.restore_path_to_snapshot(path, snapshot).await?;
+        self.restore_path_in_index(path, &snapshot.index_tree).await?;
         file.set_all_hunks_status(ReviewStatus::Rejected);
+        Ok(())
+    }
+
+    pub async fn reject_file_in_place(&self, file: &mut FileDiff) -> Result<()> {
+        let path = display_path(file);
+        self.run_git(&["restore", "--staged", "--", path]).await?;
+        file.set_all_hunks_status(ReviewStatus::Rejected);
+        Ok(())
+    }
+
+    pub async fn unstage_file_in_place(&self, file: &mut FileDiff) -> Result<()> {
+        let path = display_path(file);
+        self.run_git(&["restore", "--staged", "--", path]).await?;
+        file.set_all_hunks_status(ReviewStatus::Unreviewed);
         Ok(())
     }
 
@@ -89,16 +105,31 @@ impl GitService {
             .context("apply patch to index")
     }
 
-    pub async fn reverse_apply_patch(&self, patch: &str) -> Result<()> {
-        self.run_git_apply(&["apply", "--reverse", "-"], patch)
-            .await
-            .context("reverse patch in worktree")
-    }
+    pub async fn sync_file_hunks_to_index(
+        &self,
+        file: &FileDiff,
+        snapshot: Option<&WorkspaceSnapshot>,
+    ) -> Result<()> {
+        let path = display_path(file);
 
-    pub async fn reverse_apply_patch_to_index(&self, patch: &str) -> Result<()> {
-        self.run_git_apply(&["apply", "--cached", "--reverse", "-"], patch)
-            .await
-            .context("reverse patch in index")
+        if let Some(snapshot) = snapshot {
+            self.restore_path_in_index(path, &snapshot.index_tree).await?;
+        } else {
+            self.run_git(&["restore", "--staged", "--", path]).await?;
+        }
+
+        let accepted_patch = file
+            .hunks
+            .iter()
+            .filter(|hunk| hunk.review_status == ReviewStatus::Accepted)
+            .map(|hunk| patch_from_hunk(file, hunk))
+            .collect::<Vec<_>>()
+            .join("");
+        if !accepted_patch.is_empty() {
+            self.apply_patch_to_index(&accepted_patch).await?;
+        }
+
+        Ok(())
     }
 
     pub async fn has_staged_changes(&self) -> Result<bool> {
@@ -111,13 +142,6 @@ impl GitService {
         Ok(())
     }
 
-    async fn restore_path_to_snapshot(&self, path: &str, snapshot: &WorkspaceSnapshot) -> Result<()> {
-        self.restore_path_in_index(path, &snapshot.index_tree).await?;
-        self.restore_path_in_worktree(path, &snapshot.worktree_tree)
-            .await?;
-        Ok(())
-    }
-
     async fn restore_path_in_index(&self, path: &str, tree: &str) -> Result<()> {
         if self.tree_contains_path(tree, path).await? {
             self.run_git(&["restore", "--source", tree, "--staged", "--", path])
@@ -126,31 +150,6 @@ impl GitService {
             self.run_git(&["rm", "--cached", "-r", "--ignore-unmatch", "--", path])
                 .await?;
         }
-        Ok(())
-    }
-
-    async fn restore_path_in_worktree(&self, path: &str, tree: &str) -> Result<()> {
-        if self.tree_contains_path(tree, path).await? {
-            self.run_git(&["restore", "--source", tree, "--worktree", "--", path])
-                .await?;
-        } else {
-            self.remove_path_from_worktree(path).await?;
-        }
-        Ok(())
-    }
-
-    async fn remove_path_from_worktree(&self, path: &str) -> Result<()> {
-        let full_path = self.repo_path.join(path);
-        if !full_path.exists() {
-            return Ok(());
-        }
-
-        if full_path.is_dir() {
-            tokio::fs::remove_dir_all(&full_path).await?;
-        } else {
-            tokio::fs::remove_file(&full_path).await?;
-        }
-        prune_empty_parents(&self.repo_path, &full_path).await?;
         Ok(())
     }
 
@@ -276,9 +275,9 @@ impl GitService {
             command.env(key, value);
         }
 
-        command
-            .output()
+        timeout(GIT_COMMAND_TIMEOUT, command.output())
             .await
+            .with_context(|| format!("git command timed out {:?}", args))?
             .with_context(|| format!("run git {:?}", args))
     }
 }
@@ -305,24 +304,6 @@ async fn cleanup_temp_index(path: &Path) {
     let _ = tokio::fs::remove_file(lock_path).await;
 }
 
-async fn prune_empty_parents(repo_root: &Path, path: &Path) -> Result<()> {
-    let mut current = path.parent();
-    while let Some(dir) = current {
-        if dir == repo_root {
-            break;
-        }
-
-        match tokio::fs::remove_dir(dir).await {
-            Ok(_) => current = dir.parent(),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => current = dir.parent(),
-            Err(err) if err.kind() == std::io::ErrorKind::DirectoryNotEmpty => break,
-            Err(err) => return Err(err.into()),
-        }
-    }
-
-    Ok(())
-}
-
 async fn feed_stdin_and_wait(
     mut child: tokio::process::Child,
     patch: &str,
@@ -332,7 +313,10 @@ async fn feed_stdin_and_wait(
     let mut stdin = child.stdin.take().context("child stdin unavailable")?;
     stdin.write_all(patch.as_bytes()).await?;
     stdin.shutdown().await?;
-    let output = child.wait_with_output().await?;
+    drop(stdin);
+    let output = timeout(GIT_COMMAND_TIMEOUT, child.wait_with_output())
+        .await
+        .context("git apply timed out")??;
     Ok(output)
 }
 
@@ -374,6 +358,8 @@ mod tests {
     use std::path::Path;
     use tokio::process::Command;
 
+    use crate::domain::diff::ReviewStatus;
+
     #[tokio::test]
     async fn collect_diff_handles_empty_repo() -> Result<()> {
         let temp = tempfile::tempdir()?;
@@ -413,7 +399,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reject_file_restores_preexisting_staged_state() -> Result<()> {
+    async fn reject_file_restores_preexisting_staged_index_state() -> Result<()> {
         let temp = tempfile::tempdir()?;
         init_repo(temp.path()).await?;
         write_file(temp.path(), "tracked.txt", "base\n").await?;
@@ -436,8 +422,37 @@ mod tests {
         service.reject_file(file, &snapshot).await?;
 
         let worktree = tokio::fs::read_to_string(temp.path().join("tracked.txt")).await?;
-        assert_eq!(worktree, "preexisting\n");
+        assert_eq!(worktree, "preexisting\nagent\n");
 
+        let staged = git_stdout(temp.path(), &["show", ":tracked.txt"]).await?;
+        assert_eq!(staged, "preexisting\n");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reject_file_keeps_agent_changes_in_worktree() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        init_repo(temp.path()).await?;
+        write_file(temp.path(), "tracked.txt", "base\n").await?;
+        git(temp.path(), &["add", "tracked.txt"]).await?;
+        git(temp.path(), &["commit", "-m", "init"]).await?;
+
+        write_file(temp.path(), "tracked.txt", "preexisting\n").await?;
+        git(temp.path(), &["add", "tracked.txt"]).await?;
+
+        let service = GitService::new(temp.path());
+        let snapshot = service.snapshot_workspace().await?;
+        write_file(temp.path(), "tracked.txt", "preexisting\nagent\n").await?;
+        let (_, mut files) = service.collect_session_diff(&snapshot).await?;
+        let file = files
+            .iter_mut()
+            .find(|file| file.display_path() == "tracked.txt")
+            .expect("tracked session diff");
+
+        service.reject_file(file, &snapshot).await?;
+
+        let worktree = tokio::fs::read_to_string(temp.path().join("tracked.txt")).await?;
+        assert_eq!(worktree, "preexisting\nagent\n");
         let staged = git_stdout(temp.path(), &["show", ":tracked.txt"]).await?;
         assert_eq!(staged, "preexisting\n");
         Ok(())
@@ -485,6 +500,63 @@ mod tests {
         assert_eq!(head.trim(), "commit accepted changes");
         let content = tokio::fs::read_to_string(temp.path().join("tracked.txt")).await?;
         assert_eq!(content, "accepted\n");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sync_file_hunks_keeps_index_clean_for_rejected_hunks() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        init_repo(temp.path()).await?;
+        write_file(temp.path(), "tracked.txt", "base\nkeep\n").await?;
+        git(temp.path(), &["add", "tracked.txt"]).await?;
+        git(temp.path(), &["commit", "-m", "init"]).await?;
+
+        let service = GitService::new(temp.path());
+        let snapshot = service.snapshot_workspace().await?;
+        write_file(temp.path(), "tracked.txt", "changed\nkeep\n").await?;
+        let (_, mut files) = service.collect_session_diff(&snapshot).await?;
+        let file = files
+            .iter_mut()
+            .find(|file| file.display_path() == "tracked.txt")
+            .expect("tracked file in session diff");
+
+        file.hunks[0].review_status = ReviewStatus::Rejected;
+        file.sync_review_status();
+        service.sync_file_hunks_to_index(file, Some(&snapshot)).await?;
+        assert!(!service.has_staged_changes().await?);
+
+        let worktree = tokio::fs::read_to_string(temp.path().join("tracked.txt")).await?;
+        assert_eq!(worktree, "changed\nkeep\n");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sync_file_hunks_stages_only_accepted_hunks() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        init_repo(temp.path()).await?;
+        write_file(temp.path(), "tracked.txt", "zero\none\ntwo\nthree\nfour\nfive\n").await?;
+        git(temp.path(), &["add", "tracked.txt"]).await?;
+        git(temp.path(), &["commit", "-m", "init"]).await?;
+
+        let service = GitService::new(temp.path());
+        let snapshot = service.snapshot_workspace().await?;
+        write_file(temp.path(), "tracked.txt", "ZERO\none\ntwo\nthree\nFOUR\nfive\n").await?;
+        let (_, mut files) = service.collect_session_diff(&snapshot).await?;
+        let file = files
+            .iter_mut()
+            .find(|file| file.display_path() == "tracked.txt")
+            .expect("tracked file in session diff");
+
+        assert_eq!(file.hunks.len(), 1);
+        file.hunks[0].review_status = ReviewStatus::Accepted;
+        file.sync_review_status();
+        service.sync_file_hunks_to_index(file, Some(&snapshot)).await?;
+
+        let staged_patch = git_stdout(temp.path(), &["diff", "--cached", "--", "tracked.txt"]).await?;
+        assert!(staged_patch.contains("+ZERO"));
+        assert!(staged_patch.contains("+FOUR"));
+        let worktree = tokio::fs::read_to_string(temp.path().join("tracked.txt")).await?;
+        assert_eq!(worktree, "ZERO\none\ntwo\nthree\nFOUR\nfive\n");
         Ok(())
     }
 
