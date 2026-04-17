@@ -582,9 +582,11 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             styles::muted(),
         ),
     ])];
+    let mut hunk_starts = Vec::new();
 
     if let Some(file) = app.review.files.get(app.review.cursor_file) {
         for (index, hunk) in file.hunks.iter().enumerate() {
+            hunk_starts.push((index, diff_lines.len()));
             let mut style = Style::default()
                 .fg(styles::TEXT_PRIMARY)
                 .bg(styles::SURFACE_RAISED);
@@ -634,8 +636,39 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         }
     }
 
-    let diff = Paragraph::new(diff_lines).wrap(Wrap { trim: false });
+    let diff_scroll = diff_scroll_offset(app, sections[1], &diff_lines, &hunk_starts);
+    let diff = Paragraph::new(diff_lines)
+        .scroll((diff_scroll, 0))
+        .wrap(Wrap { trim: false });
     frame.render_widget(diff, sections[1]);
+}
+
+fn diff_scroll_offset(
+    app: &App,
+    area: Rect,
+    diff_lines: &[Line<'_>],
+    hunk_starts: &[(usize, usize)],
+) -> u16 {
+    if app.review.focus != ReviewFocus::Hunks {
+        return 0;
+    }
+
+    let Some((_, selected_line)) = hunk_starts
+        .iter()
+        .find(|(index, _)| *index == app.review.cursor_hunk)
+    else {
+        return 0;
+    };
+
+    let visible_height = usize::from(area.height.max(1));
+    if visible_height == 0 {
+        return 0;
+    }
+
+    let total_lines = diff_lines.len();
+    let max_scroll = total_lines.saturating_sub(visible_height);
+    let preferred_top = selected_line.saturating_sub(visible_height.saturating_sub(3));
+    preferred_top.min(max_scroll).min(u16::MAX as usize) as u16
 }
 
 fn draw_composer(frame: &mut ratatui::Frame, area: Rect, app: &App, composer: &TextArea<'_>) {
