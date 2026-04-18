@@ -1,4 +1,4 @@
-use ratatui::style::{Color, Modifier, Style};
+use ratatui_core::style::{Color, Modifier, Style};
 
 pub const BASE_BG: Color = Color::Rgb(13, 17, 23);
 pub const SURFACE: Color = Color::Rgb(18, 18, 18);

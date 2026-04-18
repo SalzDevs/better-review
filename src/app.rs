@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers};
@@ -13,11 +13,13 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui_core::style::{Modifier, Style};
+use ratatui_core::widgets::Widget;
+use ratatui_interact::components::{AnimatedText, AnimatedTextState, AnimatedTextStyle};
 use tokio::sync::mpsc;
-use tui_textarea::TextArea;
+use ratatui_textarea::TextArea;
 
 use crate::domain::diff::{DiffLineKind, FileDiff, ReviewStatus};
 use crate::domain::model_catalog::ModelOption;
@@ -62,7 +64,7 @@ struct App {
     selected_variant: Option<String>,
     session_snapshot: Option<WorkspaceSnapshot>,
     review_busy: bool,
-    started_at: Instant,
+    logo_animation: AnimatedTextState,
     tx: mpsc::UnboundedSender<Message>,
     rx: mpsc::UnboundedReceiver<Message>,
 }
@@ -136,7 +138,7 @@ impl App {
             selected_variant: None,
             session_snapshot: None,
             review_busy: false,
-            started_at: Instant::now(),
+            logo_animation: AnimatedTextState::with_interval(120),
             tx,
             rx,
         };
@@ -235,6 +237,10 @@ struct ReviewCounts {
     rejected: usize,
 }
 
+const BRAND_ICON: &str = "⌕";
+const BRAND_WORDMARK: &str = "better-review";
+const BRAND_TAGLINE: &str = "inspect  decide  trust";
+
 impl ReviewCounts {
     fn bump(&mut self, status: &ReviewStatus) {
         match status {
@@ -257,6 +263,8 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
     let mut model_cursor = 0_usize;
 
     loop {
+        app.logo_animation.tick_with_text_width(BRAND_WORDMARK.chars().count());
+
         while let Ok(message) = app.rx.try_recv() {
             match message {
                 Message::ModelsLoaded(result) => match result {
@@ -757,9 +765,7 @@ fn draw_top_bar(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     };
 
     let counts = app.review_counts();
-    let mut header_spans = compact_brand_lockup_spans();
-    header_spans.extend([
-        Span::raw("   "),
+    let header_spans = vec![
         Span::styled(
             match app.screen {
                 Screen::Home => "HOME",
@@ -784,7 +790,7 @@ fn draw_top_bar(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         review_state,
         Span::raw("   "),
         Span::styled(app.review_context_label(), styles::muted()),
-    ]);
+    ];
 
     let lines = vec![
         Line::from(header_spans),
@@ -807,6 +813,9 @@ fn draw_top_bar(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             .border_style(Style::default().fg(styles::BORDER_MUTED)),
     );
     frame.render_widget(paragraph, area);
+
+    let brand_area = Rect::new(area.x + 1, area.y, 18, 1);
+    render_brand_lockup(frame, brand_area, app, Alignment::Left);
 }
 
 fn draw_footer(frame: &mut ratatui::Frame, area: Rect) {
@@ -837,7 +846,7 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(8),
+            Constraint::Length(6),
             Constraint::Length(2),
             Constraint::Length(4),
             Constraint::Length(6),
@@ -845,12 +854,7 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         ])
         .split(inner);
 
-    frame.render_widget(
-        Paragraph::new(animated_logo_lines(app.started_at))
-            .alignment(Alignment::Center)
-            .style(styles::title()),
-        sections[0],
-    );
+    draw_home_brand(frame, sections[0], app);
 
     frame.render_widget(
         Paragraph::new(vec![Line::from(Span::styled(
@@ -936,7 +940,7 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     if app.review.files.is_empty() {
         let empty = Paragraph::new(vec![
-            Line::from(compact_brand_lockup_spans()),
+            Line::from(Span::raw("")),
             Line::from(Span::raw("")),
             Line::from(Span::styled("No code changes yet", styles::title())),
             Line::from(Span::raw("")),
@@ -962,6 +966,8 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         .alignment(Alignment::Center)
         .wrap(Wrap { trim: true });
         frame.render_widget(empty, centered_rect(80, 45, area));
+        let empty_brand_area = centered_rect(36, 8, area);
+        render_brand_lockup(frame, empty_brand_area, app, Alignment::Center);
         return;
     }
 
@@ -1349,92 +1355,89 @@ fn cycle_variant(app: &mut App, direction: isize) {
     app.selected_variant = variants.get(next_index).cloned();
 }
 
-fn brand_lockup_spans() -> Vec<Span<'static>> {
-    vec![
-        Span::styled(
-            "better",
-            Style::default()
-                .fg(styles::TEXT_PRIMARY)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("-", styles::muted()),
-        Span::styled(
-            "review",
-            Style::default()
-                .fg(styles::TEXT_PRIMARY)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::styled(lens_frame().0, styles::subtle()),
-        Span::styled(lens_frame().1, styles::title()),
-        Span::styled(lens_frame().2, styles::subtle()),
-    ]
+fn render_brand_lockup(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    app: &App,
+    alignment: Alignment,
+) {
+    let width = BRAND_ICON.chars().count() as u16 + 2 + BRAND_WORDMARK.chars().count() as u16;
+    let x = match alignment {
+        Alignment::Center => area.x + area.width.saturating_sub(width) / 2,
+        Alignment::Right => area.x + area.width.saturating_sub(width),
+        Alignment::Left => area.x,
+    };
+    let icon_area = Rect::new(x, area.y, BRAND_ICON.chars().count() as u16, 1);
+    let word_area = Rect::new(
+        x + BRAND_ICON.chars().count() as u16 + 2,
+        area.y,
+        BRAND_WORDMARK.chars().count() as u16,
+        1,
+    );
+
+    AnimatedText::new(BRAND_ICON, &app.logo_animation)
+        .style(
+            AnimatedTextStyle::wave(styles::TEXT_MUTED, styles::TEXT_PRIMARY)
+                .modifiers(Modifier::BOLD)
+                .wave_width(1),
+        )
+        .render(icon_area, frame.buffer_mut());
+
+    AnimatedText::new(BRAND_WORDMARK, &app.logo_animation)
+        .style(
+            AnimatedTextStyle::wave(styles::TEXT_MUTED, styles::TEXT_PRIMARY)
+                .modifiers(Modifier::BOLD)
+                .wave_width(4),
+        )
+        .render(word_area, frame.buffer_mut());
 }
 
-fn compact_brand_lockup_spans() -> Vec<Span<'static>> {
-    brand_lockup_spans()
+fn draw_home_brand(frame: &mut ratatui::Frame, area: Rect, app: &App) {
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
+        .split(area);
+
+    frame.render_widget(Paragraph::new(" "), sections[0]);
+    render_brand_lockup(frame, sections[1], app, Alignment::Center);
+    frame.render_widget(
+        Paragraph::new(BRAND_TAGLINE)
+            .alignment(Alignment::Center)
+            .style(styles::muted()),
+        sections[3],
+    );
+    frame.render_widget(
+        Paragraph::new("A review lens for agent-generated diffs.")
+            .alignment(Alignment::Center)
+            .style(styles::subtle()),
+        sections[4],
+    );
 }
 
-fn animated_logo_lines(started_at: Instant) -> Vec<Line<'static>> {
-    let frame = lens_animation_frame(started_at);
-    vec![
-        Line::from(Span::styled("", styles::title())),
-        Line::from(vec![
-            Span::styled("        better-review", styles::title()),
-            Span::raw("   "),
-            Span::styled(frame.0, styles::subtle()),
-            Span::styled(frame.1, styles::title()),
-            Span::styled(frame.2, styles::subtle()),
-        ]),
-        Line::from(Span::raw("")),
-        Line::from(Span::styled(
-            "             inspect  decide  trust",
-            styles::muted(),
-        )),
-        Line::from(Span::raw("")),
-        Line::from(Span::styled(
-            "             a moving lens that resolves to check",
-            styles::subtle(),
-        )),
-    ]
-}
-
-fn lens_animation_frame(started_at: Instant) -> (&'static str, &'static str, &'static str) {
-    let frames = [
-        ("(", ".", ")"),
-        ("(", "o", ")"),
-        ("<", "o", ")"),
-        ("<", "O", ">"),
-        ("<", "o", ">"),
-        ("(", "o", ">"),
-        ("(", ".", ")"),
-        ("[", "✓", "]"),
-    ];
-    let tick = started_at.elapsed().as_millis() / 140;
-    frames[(tick as usize) % frames.len()]
-}
-
-fn lens_frame() -> (&'static str, &'static str, &'static str) {
-    ("[", "◌", "]")
-}
-
-fn to_textarea_input(key: KeyEvent) -> tui_textarea::Input {
-    tui_textarea::Input {
+fn to_textarea_input(key: KeyEvent) -> ratatui_textarea::Input {
+    ratatui_textarea::Input {
         key: match key.code {
-            KeyCode::Backspace => tui_textarea::Key::Backspace,
-            KeyCode::Enter => tui_textarea::Key::Enter,
-            KeyCode::Left => tui_textarea::Key::Left,
-            KeyCode::Right => tui_textarea::Key::Right,
-            KeyCode::Up => tui_textarea::Key::Up,
-            KeyCode::Down => tui_textarea::Key::Down,
-            KeyCode::Home => tui_textarea::Key::Home,
-            KeyCode::End => tui_textarea::Key::End,
-            KeyCode::PageUp => tui_textarea::Key::PageUp,
-            KeyCode::PageDown => tui_textarea::Key::PageDown,
-            KeyCode::Delete => tui_textarea::Key::Delete,
-            KeyCode::Char(ch) => tui_textarea::Key::Char(ch),
-            KeyCode::Tab => tui_textarea::Key::Tab,
-            _ => tui_textarea::Key::Null,
+            KeyCode::Backspace => ratatui_textarea::Key::Backspace,
+            KeyCode::Enter => ratatui_textarea::Key::Enter,
+            KeyCode::Left => ratatui_textarea::Key::Left,
+            KeyCode::Right => ratatui_textarea::Key::Right,
+            KeyCode::Up => ratatui_textarea::Key::Up,
+            KeyCode::Down => ratatui_textarea::Key::Down,
+            KeyCode::Home => ratatui_textarea::Key::Home,
+            KeyCode::End => ratatui_textarea::Key::End,
+            KeyCode::PageUp => ratatui_textarea::Key::PageUp,
+            KeyCode::PageDown => ratatui_textarea::Key::PageDown,
+            KeyCode::Delete => ratatui_textarea::Key::Delete,
+            KeyCode::Char(ch) => ratatui_textarea::Key::Char(ch),
+            KeyCode::Tab => ratatui_textarea::Key::Tab,
+            _ => ratatui_textarea::Key::Null,
         },
         ctrl: key.modifiers.contains(KeyModifiers::CONTROL),
         alt: key.modifiers.contains(KeyModifiers::ALT),
