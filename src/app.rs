@@ -54,6 +54,7 @@ struct App {
     opencode: OpencodeService,
     status: String,
     run_state: RunState,
+    screen: Screen,
     review: ReviewUiState,
     overlay: Overlay,
     models: Vec<ModelOption>,
@@ -78,6 +79,12 @@ enum Overlay {
     Composer,
     ModelPicker,
     CommitPrompt,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Screen {
+    Home,
+    Review,
 }
 
 #[derive(Default)]
@@ -120,6 +127,7 @@ impl App {
             opencode,
             status: "Press Ctrl+O to open the composer.".to_string(),
             run_state: RunState::Ready,
+            screen: Screen::Home,
             review: ReviewUiState::default(),
             overlay: Overlay::None,
             models: Vec::new(),
@@ -271,6 +279,11 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                         app.review.cursor_hunk = 0;
                         app.review.focus = ReviewFocus::Files;
                         app.review.session_only = app.session_snapshot.is_some();
+                        app.screen = if app.review.files.is_empty() {
+                            Screen::Home
+                        } else {
+                            Screen::Review
+                        };
                         app.status = if app.review.files.is_empty() {
                             "Run finished with no code changes.".to_string()
                         } else {
@@ -470,6 +483,17 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                             continue;
                         }
 
+                        if key.code == KeyCode::Enter && app.screen == Screen::Home {
+                            if app.review.files.is_empty() {
+                                app.status =
+                                    "No reviewable changes yet. Start with Ctrl+O.".to_string();
+                            } else {
+                                app.screen = Screen::Review;
+                                app.status = "Review workspace ready.".to_string();
+                            }
+                            continue;
+                        }
+
                         if key.code == KeyCode::Char('c') {
                             if app.review_busy {
                                 app.status = "Wait for the current review update to finish.".to_string();
@@ -490,6 +514,10 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
 }
 
 async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    if app.screen != Screen::Review {
+        return Ok(());
+    }
+
     if app.review.files.is_empty() {
         return Ok(());
     }
@@ -504,7 +532,14 @@ async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
 
     match key.code {
         KeyCode::Enter => app.review.focus = ReviewFocus::Hunks,
-        KeyCode::Esc => app.review.focus = ReviewFocus::Files,
+        KeyCode::Esc => {
+            if app.review.focus == ReviewFocus::Hunks {
+                app.review.focus = ReviewFocus::Files;
+            } else {
+                app.screen = Screen::Home;
+                app.status = "Back on the better-review home screen.".to_string();
+            }
+        }
         KeyCode::Up | KeyCode::Char('k') => {
             if app.review.focus == ReviewFocus::Files {
                 app.review.cursor_file = app.review.cursor_file.saturating_sub(1);
@@ -662,7 +697,10 @@ fn draw(
         .split(size);
 
     draw_top_bar(frame, layout[0], app);
-    draw_review(frame, layout[1], app);
+    match app.screen {
+        Screen::Home => draw_home(frame, layout[1], app),
+        Screen::Review => draw_review(frame, layout[1], app),
+    }
     draw_footer(frame, layout[2]);
 
     match app.overlay {
@@ -717,28 +755,37 @@ fn draw_top_bar(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     };
 
     let counts = app.review_counts();
+    let mut header_spans = brand_lockup_spans();
+    header_spans.extend([
+        Span::raw("   "),
+        Span::styled(
+            match app.screen {
+                Screen::Home => "HOME",
+                Screen::Review => "REVIEW",
+            },
+            styles::muted(),
+        ),
+        Span::raw("   "),
+        Span::styled(
+            app.repo_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("repo"),
+            styles::muted(),
+        ),
+        Span::raw("    "),
+        Span::styled("Model ", styles::muted()),
+        Span::styled(app.current_model_label(), styles::title()),
+        Span::raw("   "),
+        status,
+        Span::raw("   "),
+        review_state,
+        Span::raw("   "),
+        Span::styled(app.review_context_label(), styles::muted()),
+    ]);
 
     let lines = vec![
-        Line::from(vec![
-            Span::styled("better-review", styles::title()),
-            Span::raw("  "),
-            Span::styled(
-                app.repo_path
-                    .file_name()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or("repo"),
-                styles::muted(),
-            ),
-            Span::raw("    "),
-            Span::styled("Model ", styles::muted()),
-            Span::styled(app.current_model_label(), styles::title()),
-            Span::raw("   "),
-            status,
-            Span::raw("   "),
-            review_state,
-            Span::raw("   "),
-            Span::styled(app.review_context_label(), styles::muted()),
-        ]),
+        Line::from(header_spans),
         Line::from(vec![
             Span::styled(app.status.as_str(), styles::muted()),
             Span::raw("    "),
@@ -763,7 +810,7 @@ fn draw_top_bar(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 fn draw_footer(frame: &mut ratatui::Frame, area: Rect) {
     let line = Line::from(vec![
         Span::styled(
-            "Ctrl+O composer  |  Enter open diff  |  Esc files  |  y accept  |  x reject  |  c commit",
+            "Ctrl+O composer  |  Enter continue  |  Esc home  |  y accept  |  x reject  |  c commit",
             styles::subtle(),
         ),
         Span::raw("    "),
@@ -772,9 +819,126 @@ fn draw_footer(frame: &mut ratatui::Frame, area: Rect) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
+fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
+    let hero_area = centered_rect(78, 74, area);
+    let block = Block::default()
+        .title("Home")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(styles::BORDER_MUTED))
+        .style(Style::default().bg(styles::SURFACE));
+    frame.render_widget(block, hero_area);
+
+    let inner = hero_area.inner(ratatui::layout::Margin {
+        horizontal: 2,
+        vertical: 1,
+    });
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(8),
+            Constraint::Length(2),
+            Constraint::Length(4),
+            Constraint::Length(6),
+            Constraint::Min(4),
+        ])
+        .split(inner);
+
+    frame.render_widget(
+        Paragraph::new(pixel_logo_lines())
+            .alignment(Alignment::Center)
+            .style(styles::title()),
+        sections[0],
+    );
+
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled("better-review", styles::title())),
+            Line::from(Span::styled(
+                "Review agent changes with intent.",
+                styles::muted(),
+            )),
+        ])
+        .alignment(Alignment::Center),
+        sections[1],
+    );
+
+    let counts = app.review_counts();
+    let summary = vec![
+        Line::from(vec![
+            Span::styled("Workspace  ", styles::subtle()),
+            Span::styled(
+                app.repo_path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("repo"),
+                styles::title(),
+            ),
+            Span::raw("    "),
+            Span::styled("Model  ", styles::subtle()),
+            Span::styled(app.current_model_label(), styles::title()),
+        ]),
+        Line::from(vec![
+            Span::styled("Review queue  ", styles::subtle()),
+            Span::styled(
+                format!(
+                    "{} files  |  {} unreviewed  |  {} accepted  |  {} rejected",
+                    app.review.files.len(),
+                    counts.unreviewed,
+                    counts.accepted,
+                    counts.rejected
+                ),
+                styles::muted(),
+            ),
+        ]),
+    ];
+    frame.render_widget(Paragraph::new(summary).alignment(Alignment::Center), sections[2]);
+
+    let action_lines = vec![
+        Line::from(Span::styled("Start here", styles::title())),
+        Line::from(Span::raw("")),
+        Line::from(vec![
+            Span::styled("Ctrl+O", styles::title()),
+            Span::raw("  compose a new agent instruction"),
+        ]),
+        Line::from(vec![
+            Span::styled("Enter", styles::title()),
+            Span::raw("   open the review workspace"),
+        ]),
+        Line::from(vec![
+            Span::styled("c", styles::title()),
+            Span::raw("       open the commit prompt"),
+        ]),
+    ];
+    frame.render_widget(
+        Paragraph::new(action_lines)
+            .alignment(Alignment::Center)
+            .block(
+                Block::default()
+                    .title("Actions")
+                    .borders(Borders::TOP)
+                    .border_style(Style::default().fg(styles::BORDER_MUTED)),
+            ),
+        sections[3],
+    );
+
+    let status_copy = if app.review.files.is_empty() {
+        "No reviewable session changes yet. Start by composing a prompt."
+    } else {
+        "A review workspace is ready. Press Enter to inspect the current diff."
+    };
+    frame.render_widget(
+        Paragraph::new(status_copy)
+            .alignment(Alignment::Center)
+            .style(styles::muted()),
+        sections[4],
+    );
+}
+
 fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     if app.review.files.is_empty() {
         let empty = Paragraph::new(vec![
+            Line::from(compact_brand_lockup_spans()),
+            Line::from(Span::raw("")),
             Line::from(Span::styled("No code changes yet", styles::title())),
             Line::from(Span::raw("")),
             Line::from(Span::styled(
@@ -1184,6 +1348,51 @@ fn cycle_variant(app: &mut App, direction: isize) {
         .unwrap_or(0) as isize;
     let next_index = (current_index + direction).rem_euclid(variants.len() as isize) as usize;
     app.selected_variant = variants.get(next_index).cloned();
+}
+
+fn brand_lockup_spans() -> Vec<Span<'static>> {
+    let mut spans = compact_brand_lockup_spans();
+    spans.insert(0, Span::styled("◢", styles::title()));
+    spans.insert(1, Span::raw(" "));
+    spans
+}
+
+fn compact_brand_lockup_spans() -> Vec<Span<'static>> {
+    vec![
+        Span::styled(
+            "▛",
+            Style::default()
+                .fg(styles::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "▌",
+            Style::default()
+                .fg(styles::SUCCESS)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "▜",
+            Style::default()
+                .fg(styles::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled("better-review", styles::title()),
+    ]
+}
+
+fn pixel_logo_lines() -> Vec<Line<'static>> {
+    vec![
+        Line::from(Span::raw("  ██      ██████   ███████  ██      ██      ")),
+        Line::from(Span::raw("  ██      ██  ██   ██       ██      ██      ")),
+        Line::from(Span::raw("  ██      ██████   █████    ██      ██      ")),
+        Line::from(Span::raw("  ██      ██  ██   ██       ██      ██      ")),
+        Line::from(Span::raw("  ██████  ██  ██   ███████  ██████  ██████  ")),
+        Line::from(Span::raw("")),
+        Line::from(Span::styled("         ▛▀▜      review with intent", styles::muted())),
+        Line::from(Span::styled("         ▌▟      accept only what you trust", styles::muted())),
+    ]
 }
 
 fn to_textarea_input(key: KeyEvent) -> tui_textarea::Input {
