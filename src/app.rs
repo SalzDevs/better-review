@@ -250,8 +250,6 @@ struct ReviewCounts {
 const BRAND_ICON: &str = "⌕";
 const BRAND_ICON_ALT: &str = "✓";
 const BRAND_WORDMARK: &str = "better-review";
-const BRAND_TAGLINE: &str = "inspect  decide  trust";
-
 fn brand_lockup_width() -> u16 {
     BRAND_ICON.chars().count() as u16 + 2 + BRAND_WORDMARK.chars().count() as u16
 }
@@ -739,12 +737,13 @@ fn draw(
     model_cursor: usize,
 ) {
     let size = frame.area();
+    let footer_height = if app.screen == Screen::Review { 2 } else { 0 };
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(2),
             Constraint::Min(10),
-            Constraint::Length(2),
+            Constraint::Length(footer_height),
         ])
         .split(size);
 
@@ -768,6 +767,19 @@ fn draw(
 }
 
 fn draw_top_bar(frame: &mut ratatui::Frame, area: Rect, app: &App) {
+    if app.screen == Screen::Home {
+        render_brand_lockup(frame, area, app, Alignment::Center);
+        if area.width > 0 {
+            frame.render_widget(
+                Block::default()
+                    .borders(Borders::BOTTOM)
+                    .border_style(Style::default().fg(styles::BORDER_MUTED)),
+                area,
+            );
+        }
+        return;
+    }
+
     let brand_width = brand_lockup_width();
     let brand_inset = u16::from(area.width > 1);
     let reserved_brand_width = brand_width.min(area.width.saturating_sub(brand_inset));
@@ -913,9 +925,8 @@ fn draw_footer(frame: &mut ratatui::Frame, area: Rect) {
 }
 
 fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
-    let hero_area = centered_rect(74, 48, area);
+    let hero_area = area;
     let block = Block::default()
-        .title("Home")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(styles::BORDER_MUTED))
         .style(Style::default().bg(styles::SURFACE));
@@ -928,15 +939,13 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(6),
+            Constraint::Min(1),
             Constraint::Length(2),
             Constraint::Length(2),
             Constraint::Length(2),
             Constraint::Min(1),
         ])
         .split(inner);
-
-    draw_home_brand(frame, sections[0], app);
 
     let counts = app.review_counts();
     let summary = Line::from(vec![
@@ -1515,29 +1524,6 @@ fn render_brand_lockup(
             )
             .render(word_area, frame.buffer_mut());
     }
-}
-
-fn draw_home_brand(frame: &mut ratatui::Frame, area: Rect, app: &App) {
-    let sections = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(1),
-        ])
-        .split(area);
-
-    frame.render_widget(Paragraph::new(" "), sections[0]);
-    render_brand_lockup(frame, sections[1], app, Alignment::Center);
-    frame.render_widget(
-        Paragraph::new(BRAND_TAGLINE)
-            .alignment(Alignment::Center)
-            .style(styles::soft_accent()),
-        sections[3],
-    );
 }
 
 fn to_textarea_input(key: KeyEvent) -> ratatui_textarea::Input {
