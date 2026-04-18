@@ -463,12 +463,6 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                         KeyCode::Tab => {
                             app.overlay = Overlay::ModelPicker;
                         }
-                        KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            submit_composer_prompt(&mut app, &mut composer).await?;
-                        }
-                        KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                            composer.input(to_textarea_input(key));
-                        }
                         KeyCode::Enter => {
                             submit_composer_prompt(&mut app, &mut composer).await?;
                         }
@@ -512,12 +506,6 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                         KeyCode::Esc => {
                             app.overlay = Overlay::None;
                             app.status = "Commit cancelled. Review remains active.".to_string();
-                        }
-                        KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            submit_commit_message(&mut app, &mut commit_message).await?;
-                        }
-                        KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                            commit_message.input(to_textarea_input(key));
                         }
                         KeyCode::Enter => {
                             submit_commit_message(&mut app, &mut commit_message).await?;
@@ -911,7 +899,7 @@ fn draw_footer(frame: &mut ratatui::Frame, area: Rect) {
 }
 
 fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
-    let hero_area = centered_rect(78, 74, area);
+    let hero_area = centered_rect(74, 48, area);
     let block = Block::default()
         .title("Home")
         .borders(Borders::ALL)
@@ -928,92 +916,62 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         .constraints([
             Constraint::Length(6),
             Constraint::Length(2),
-            Constraint::Length(4),
-            Constraint::Length(6),
-            Constraint::Min(4),
+            Constraint::Length(2),
+            Constraint::Length(2),
+            Constraint::Min(1),
         ])
         .split(inner);
 
     draw_home_brand(frame, sections[0], app);
 
-    frame.render_widget(
-        Paragraph::new(vec![Line::from(Span::styled(
-            "Review agent changes with intent.",
-            styles::soft_accent(),
-        ))])
-        .alignment(Alignment::Center),
-        sections[1],
-    );
-
     let counts = app.review_counts();
-    let summary = vec![
-        Line::from(vec![
-            Span::styled("Workspace  ", styles::soft_accent()),
-            Span::styled(
-                app.repo_path
-                    .file_name()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or("repo"),
-                styles::title(),
-            ),
-            Span::raw("    "),
-            Span::styled("Model  ", styles::soft_accent()),
-            Span::styled(app.current_model_label(), styles::title()),
-        ]),
-        Line::from(vec![
-            Span::styled("Review queue  ", styles::soft_accent()),
-            Span::styled(
-                format!(
-                    "{} files  |  {} unreviewed  |  {} accepted  |  {} rejected",
-                    app.review.files.len(),
-                    counts.unreviewed,
-                    counts.accepted,
-                    counts.rejected
-                ),
-                styles::muted(),
-            ),
-        ]),
-    ];
-    frame.render_widget(Paragraph::new(summary).alignment(Alignment::Center), sections[2]);
+    let summary = Line::from(vec![
+        Span::styled("Repo ", styles::soft_accent()),
+        Span::styled(
+            app.repo_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("repo"),
+            styles::title(),
+        ),
+        Span::raw("  |  "),
+        Span::styled("Model ", styles::soft_accent()),
+        Span::styled(app.current_model_label(), styles::title()),
+    ]);
+    frame.render_widget(Paragraph::new(summary).alignment(Alignment::Center), sections[1]);
 
-    let action_lines = vec![
-        Line::from(Span::styled("Start here", styles::accent_bold())),
-        Line::from(Span::raw("")),
-        Line::from(vec![
-            Span::styled("Ctrl+O", styles::keybind()),
-            Span::raw("  compose a new agent instruction"),
-        ]),
-        Line::from(vec![
-            Span::styled("Enter", styles::keybind()),
-            Span::raw("   open the review workspace"),
-        ]),
-        Line::from(vec![
-            Span::styled("c", styles::keybind()),
-            Span::raw("       open the commit prompt"),
-        ]),
-    ];
+    let queue = Line::from(vec![
+        Span::styled("Queue ", styles::soft_accent()),
+        Span::styled(
+            format!(
+                "{} files  {} unreviewed  {} accepted  {} rejected",
+                app.review.files.len(),
+                counts.unreviewed,
+                counts.accepted,
+                counts.rejected
+            ),
+            styles::muted(),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(queue).alignment(Alignment::Center), sections[2]);
+
+    let action_line = Line::from(vec![
+        Span::styled("Ctrl+O", styles::keybind()),
+        Span::raw(" compose  |  "),
+        Span::styled("Enter", styles::keybind()),
+        Span::raw(" review  |  "),
+        Span::styled("c", styles::keybind()),
+        Span::raw(" commit"),
+    ]);
     frame.render_widget(
-        Paragraph::new(action_lines)
+        Paragraph::new(action_line)
             .alignment(Alignment::Center)
             .block(
                 Block::default()
-                    .title("Actions")
                     .borders(Borders::TOP)
                     .border_style(Style::default().fg(styles::BORDER_MUTED)),
             ),
         sections[3],
-    );
-
-    let status_copy = if app.review.files.is_empty() {
-        "No reviewable session changes yet. Start by composing a prompt."
-    } else {
-        "A review workspace is ready. Press Enter to inspect the current diff."
-    };
-    frame.render_widget(
-        Paragraph::new(status_copy)
-            .alignment(Alignment::Center)
-            .style(styles::muted()),
-        sections[4],
     );
 }
 
@@ -1245,8 +1203,6 @@ fn draw_composer(frame: &mut ratatui::Frame, area: Rect, app: &App, composer: &T
         Paragraph::new(vec![Line::from(vec![
             Span::styled("Enter", styles::keybind()),
             Span::raw(" run   "),
-            Span::styled("Shift+Enter", styles::keybind()),
-            Span::raw(" newline   "),
             Span::styled("Up/Down", styles::keybind()),
             Span::raw(" move"),
         ])])
@@ -1297,8 +1253,6 @@ fn draw_commit_prompt(
             Span::raw("Commit prompt active  |  "),
             Span::styled("Enter", styles::keybind()),
             Span::raw(" commit  |  "),
-            Span::styled("Shift+Enter", styles::keybind()),
-            Span::raw(" newline  |  "),
             Span::styled("Esc", styles::keybind()),
             Span::raw(" close"),
         ])])
