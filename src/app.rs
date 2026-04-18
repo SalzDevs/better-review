@@ -162,10 +162,22 @@ impl App {
     }
 
     fn current_model_label(&self) -> String {
-        match (&self.selected_model, &self.selected_variant) {
-            (Some(model), Some(variant)) if !variant.is_empty() => format!("{model} [{variant}]"),
-            (Some(model), _) => model.clone(),
-            _ => "loading...".to_string(),
+        let Some(selected_model) = self.selected_model.as_ref() else {
+            return "loading...".to_string();
+        };
+
+        let Some(model) = self
+            .models
+            .iter()
+            .find(|option| &option.id == selected_model)
+        else {
+            return sanitize_model_display(selected_model);
+        };
+
+        let name = sanitize_model_display(&model.name);
+        match self.selected_variant.as_deref().map(sanitize_variant_display) {
+            Some(variant) if !variant.is_empty() => format!("{name} [{variant}]"),
+            _ => name,
         }
     }
 
@@ -741,7 +753,9 @@ fn draw(
         Screen::Home => draw_home(frame, layout[1], app),
         Screen::Review => draw_review(frame, layout[1], app),
     }
-    draw_footer(frame, layout[2]);
+    if app.screen == Screen::Review {
+        draw_footer(frame, layout[2]);
+    }
 
     match app.overlay {
         Overlay::Composer => draw_composer(frame, layout[1], app, composer),
@@ -961,7 +975,9 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         Span::styled("Enter", styles::keybind()),
         Span::raw(" review  |  "),
         Span::styled("c", styles::keybind()),
-        Span::raw(" commit"),
+        Span::raw(" commit  |  "),
+        Span::styled("Ctrl+C", styles::keybind()),
+        Span::raw(" quit"),
     ]);
     frame.render_widget(
         Paragraph::new(action_line)
@@ -1325,14 +1341,20 @@ fn draw_model_picker(
             Style::default().fg(styles::TEXT_MUTED)
         };
         let mut spans = vec![Span::styled(
-            model.name.clone(),
+            sanitize_model_display(&model.name),
             style.add_modifier(Modifier::BOLD),
         )];
         spans.push(Span::raw("  "));
         spans.push(Span::styled(model.id.clone(), styles::subtle()));
-        if !model.variants.is_empty() {
+        let display_variants = model
+            .variants
+            .iter()
+            .map(|variant| sanitize_variant_display(variant))
+            .filter(|variant| !variant.is_empty())
+            .collect::<Vec<_>>();
+        if !display_variants.is_empty() {
             spans.push(Span::raw("  "));
-            spans.push(Span::styled(model.variants.join(", "), styles::subtle()));
+            spans.push(Span::styled(display_variants.join(", "), styles::subtle()));
         }
         if Some(&model.id) == app.selected_model.as_ref() {
             spans.push(Span::raw("  "));
@@ -1388,6 +1410,22 @@ fn filtered_models<'a>(
             .then(a.1.name.cmp(&b.1.name))
     });
     scored.into_iter().map(|(_, model)| model).collect()
+}
+
+fn sanitize_model_display(value: &str) -> String {
+    value
+        .replace("-thinking", "")
+        .replace(" thinking", "")
+        .trim()
+        .to_string()
+}
+
+fn sanitize_variant_display(value: &str) -> String {
+    if value.eq_ignore_ascii_case("thinking") {
+        String::new()
+    } else {
+        sanitize_model_display(value)
+    }
 }
 
 fn review_marker(
