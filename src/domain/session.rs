@@ -8,10 +8,6 @@ pub struct WorkspaceSnapshot {
 }
 
 impl WorkspaceSnapshot {
-    pub fn protected_path_count(&self) -> usize {
-        self.protected_paths.len()
-    }
-
     pub fn has_unstaged_path(&self, path: &str) -> bool {
         self.unstaged_paths
             .iter()

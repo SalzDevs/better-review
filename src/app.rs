@@ -203,20 +203,6 @@ impl App {
             .is_some_and(|snapshot| snapshot.has_unstaged_path(path))
     }
 
-    fn review_context_label(&self) -> String {
-        match &self.session_snapshot {
-            Some(snapshot) => {
-                let protected = snapshot.protected_path_count();
-                if protected == 0 {
-                    "Session-only review".to_string()
-                } else {
-                    format!("Session-only review  |  protecting {protected} pre-run path(s)")
-                }
-            }
-            None => "Workspace review".to_string(),
-        }
-    }
-
     fn review_counts(&self) -> ReviewCounts {
         let mut counts = ReviewCounts::default();
 
@@ -745,23 +731,16 @@ fn draw(
     model_cursor: usize,
 ) {
     let size = frame.area();
-    let footer_height = if app.screen == Screen::Review { 2 } else { 0 };
+    let header_height = if app.screen == Screen::Review { 1 } else { 2 };
     let layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Min(10),
-            Constraint::Length(footer_height),
-        ])
+        .constraints([Constraint::Length(header_height), Constraint::Min(10)])
         .split(size);
 
     draw_top_bar(frame, layout[0], app);
     match app.screen {
         Screen::Home => draw_home(frame, layout[1], app),
         Screen::Review => draw_review(frame, layout[1], app),
-    }
-    if app.screen == Screen::Review {
-        draw_footer(frame, layout[2]);
     }
 
     match app.overlay {
@@ -788,78 +767,7 @@ fn draw_top_bar(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         return;
     }
 
-    let content = area.inner(ratatui::layout::Margin {
-        horizontal: 2,
-        vertical: 0,
-    });
-    let sections = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Length(1)])
-        .split(content);
-
     render_brand_lockup(frame, area, app, Alignment::Center);
-
-    let run_status = match app.run_state {
-        RunState::Ready => "ready",
-        RunState::Running => "running",
-        RunState::Failed => "failed",
-    };
-    let sync_status = if app.review_busy { "syncing" } else { "idle" };
-    let meta = Line::from(vec![
-        Span::styled("repo ", styles::subtle()),
-        Span::styled(
-            app.repo_path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or("repo"),
-            styles::title(),
-        ),
-        Span::raw("  |  "),
-        Span::styled("model ", styles::subtle()),
-        Span::styled(app.current_model_label(), styles::title()),
-        Span::raw("  |  "),
-        Span::styled(run_status, styles::soft_accent()),
-        Span::raw("  |  "),
-        Span::styled(sync_status, styles::soft_accent()),
-        Span::raw("  |  "),
-        Span::styled(app.review_context_label(), styles::muted()),
-    ]);
-    frame.render_widget(Paragraph::new(meta).alignment(Alignment::Center), sections[1]);
-
-    if area.width > 0 {
-        frame.render_widget(
-            Block::default()
-                .borders(Borders::BOTTOM)
-                .border_style(Style::default().fg(styles::BORDER_MUTED)),
-            area,
-        );
-    }
-}
-
-fn draw_footer(frame: &mut ratatui::Frame, area: Rect) {
-    let line = Line::from(vec![
-        Span::styled("Ctrl+O", styles::keybind()),
-        Span::styled(" composer", styles::subtle()),
-        Span::raw("  |  "),
-        Span::styled("Enter", styles::keybind()),
-        Span::styled(" continue", styles::subtle()),
-        Span::raw("  |  "),
-        Span::styled("Esc", styles::keybind()),
-        Span::styled(" home", styles::subtle()),
-        Span::raw("  |  "),
-        Span::styled("y", styles::keybind()),
-        Span::styled(" accept", styles::subtle()),
-        Span::raw("  |  "),
-        Span::styled("x", styles::keybind()),
-        Span::styled(" reject", styles::subtle()),
-        Span::raw("  |  "),
-        Span::styled("c", styles::keybind()),
-        Span::styled(" commit", styles::subtle()),
-        Span::raw("    "),
-        Span::styled("Ctrl+C", styles::keybind()),
-        Span::styled(" quit", styles::subtle()),
-    ]);
-    frame.render_widget(Paragraph::new(line).style(styles::subtle()), area);
 }
 
 fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
@@ -988,8 +896,8 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     }
 
     let canvas = area.inner(ratatui::layout::Margin {
-        horizontal: 2,
-        vertical: 1,
+        horizontal: 1,
+        vertical: 0,
     });
     frame.render_widget(
         Block::default()
@@ -999,13 +907,13 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         canvas,
     );
     let content = canvas.inner(ratatui::layout::Margin {
-        horizontal: 2,
-        vertical: 1,
+        horizontal: 1,
+        vertical: 0,
     });
 
     let sections = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(36), Constraint::Min(30)])
+        .constraints([Constraint::Length(28), Constraint::Min(30)])
         .split(content);
 
     let counts = app.review_counts();
@@ -1063,8 +971,6 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             },
             styles::soft_accent(),
         ),
-        Span::raw("  |  "),
-        Span::styled(app.status.as_str(), styles::muted()),
     ])];
     let mut line_hunks = vec![None];
 
@@ -1141,9 +1047,7 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     }
 
     let diff_scroll = diff_scroll_offset(app, sections[1], &diff_lines);
-    let diff = Paragraph::new(diff_lines)
-        .scroll((diff_scroll, 0))
-        .wrap(Wrap { trim: false });
+    let diff = Paragraph::new(diff_lines).scroll((diff_scroll, 0));
     frame.render_widget(diff, sections[1]);
 
     if app.review.focus == ReviewFocus::Hunks {

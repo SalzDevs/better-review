@@ -384,7 +384,7 @@ mod tests {
 
         let service = GitService::new(temp.path());
         let snapshot = service.snapshot_workspace().await?;
-        assert_eq!(snapshot.protected_path_count(), 2);
+        assert_eq!(snapshot.protected_paths.len(), 2);
 
         write_file(temp.path(), "tracked.txt", "user\nagent\n").await?;
         write_file(temp.path(), "generated.rs", "fn main() {}\n").await?;
