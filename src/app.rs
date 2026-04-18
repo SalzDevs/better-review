@@ -739,6 +739,8 @@ fn draw(
 
 fn draw_top_bar(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     let brand_width = brand_lockup_width();
+    let brand_inset = u16::from(area.width > 1);
+    let reserved_brand_width = brand_width.min(area.width.saturating_sub(brand_inset));
     let status = match app.run_state {
         RunState::Ready => Span::styled(
             "READY",
@@ -807,10 +809,15 @@ fn draw_top_bar(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         Span::styled(app.review_context_label(), styles::muted()),
     ];
 
-    let brand_area = Rect::new(area.x + 1, area.y, brand_width, 1);
+    let brand_area = Rect::new(
+        area.x + brand_inset,
+        area.y,
+        area.width.saturating_sub(brand_inset),
+        1,
+    );
     render_brand_lockup(frame, brand_area, app, Alignment::Left);
 
-    let content_offset = brand_width + 4;
+    let content_offset = reserved_brand_width.saturating_add(4);
     if area.width > content_offset {
         let lines = vec![
             Line::from(header_spans),
@@ -1434,20 +1441,31 @@ fn render_brand_lockup(
     app: &App,
     alignment: Alignment,
 ) {
-    let width = brand_lockup_width();
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
     let icon = current_brand_icon(&app.logo_animation);
+    let icon_width = icon.chars().count() as u16;
+    if area.width < icon_width {
+        return;
+    }
+
+    let word_width = BRAND_WORDMARK.chars().count() as u16;
+    let gap_width = 2;
+    let show_wordmark = area.width >= icon_width + gap_width + word_width;
+    let content_width = if show_wordmark {
+        icon_width + gap_width + word_width
+    } else {
+        icon_width
+    };
+
     let x = match alignment {
-        Alignment::Center => area.x + area.width.saturating_sub(width) / 2,
-        Alignment::Right => area.x + area.width.saturating_sub(width),
+        Alignment::Center => area.x + area.width.saturating_sub(content_width) / 2,
+        Alignment::Right => area.x + area.width.saturating_sub(content_width),
         Alignment::Left => area.x,
     };
-    let icon_area = Rect::new(x, area.y, icon.chars().count() as u16, 1);
-    let word_area = Rect::new(
-        x + icon.chars().count() as u16 + 2,
-        area.y,
-        BRAND_WORDMARK.chars().count() as u16,
-        1,
-    );
+    let icon_area = Rect::new(x, area.y, icon_width, 1);
 
     let icon_style = if icon == BRAND_ICON_ALT {
         AnimatedTextStyle::pulse(styles::SUCCESS, styles::ACCENT_BRIGHT)
@@ -1458,18 +1476,19 @@ fn render_brand_lockup(
     };
 
     AnimatedText::new(icon, &app.logo_animation)
-        .style(
-            icon_style,
-        )
+        .style(icon_style)
         .render(icon_area, frame.buffer_mut());
 
-    AnimatedText::new(BRAND_WORDMARK, &app.logo_animation)
-        .style(
-            AnimatedTextStyle::wave(styles::TEXT_MUTED, styles::ACCENT_BRIGHT)
-                .modifiers(Modifier::BOLD)
-                .wave_width(4),
-        )
-        .render(word_area, frame.buffer_mut());
+    if show_wordmark {
+        let word_area = Rect::new(x + icon_width + gap_width, area.y, word_width, 1);
+        AnimatedText::new(BRAND_WORDMARK, &app.logo_animation)
+            .style(
+                AnimatedTextStyle::wave(styles::TEXT_MUTED, styles::ACCENT_BRIGHT)
+                    .modifiers(Modifier::BOLD)
+                    .wave_width(4),
+            )
+            .render(word_area, frame.buffer_mut());
+    }
 }
 
 fn draw_home_brand(frame: &mut ratatui::Frame, area: Rect, app: &App) {
