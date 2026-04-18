@@ -115,26 +115,6 @@ cargo run
 | `c` | Open commit prompt |
 | `Ctrl+C` | Quit |
 
-## Safety Model
-
-Safety is a core design constraint, not a later add-on.
-
-### 1) Snapshot before run
-
-Before invoking `opencode`, `better-review` snapshots workspace/index state (including preexisting dirty and staged paths).
-
-### 2) Review only session-generated changes
-
-The review queue is computed against the pre-run snapshot so preexisting unrelated work does not pollute review decisions.
-
-### 3) Reject is non-destructive by default
-
-Rejecting a file/hunk primarily affects staged eligibility for commit rather than blindly rewriting user worktree content.
-
-### 4) Commit guardrails
-
-If the session began with unrelated staged changes, commit flow is blocked to prevent accidental mixed commits.
-
 ## Architecture
 
 - `src/app.rs`: TUI shell, event loop, screens, overlays, rendering
@@ -152,33 +132,6 @@ If the session began with unrelated staged changes, commit flow is blocked to pr
 cargo test -- --nocapture
 ```
 
-### Current quality bar
-
-- robust parser for contiguous `opencode models --verbose` output
-- deterministic hunk staging sync
-- async hunk operations to avoid TUI freezes
-- regression tests for snapshot, reject/accept, and commit safety behavior
-
-## Roadmap
-
-- richer visibility into agent reasoning/output
-- push flow after accepted-only commit
-- session timeline/history
-- additional UX polish and onboarding refinements
-
-## Contributing
-
-Contributions are welcome.
-
-High-impact areas:
-
-- review UX and navigation polish
-- git edge-case hardening
-- documentation and onboarding improvements
-- demo/media and launch polish
-
-Until a dedicated contributing guide exists, open an issue or submit a focused PR with context.
-
 ## FAQ
 
 ### Does this replace git?
@@ -193,8 +146,3 @@ Yes. The snapshot model is specifically designed to protect preexisting dirty/st
 
 `git add -p` is powerful, but `better-review` is optimized for the agent workflow: compose prompt, inspect generated diff, decide quickly, commit accepted changes only.
 
-## License
-
-No explicit license file is currently present in this repository.
-
-If you plan to distribute broadly, add a `LICENSE` file (for example MIT or Apache-2.0) as a next step.
