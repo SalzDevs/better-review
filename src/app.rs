@@ -238,8 +238,21 @@ struct ReviewCounts {
 }
 
 const BRAND_ICON: &str = "⌕";
+const BRAND_ICON_ALT: &str = "✓";
 const BRAND_WORDMARK: &str = "better-review";
 const BRAND_TAGLINE: &str = "inspect  decide  trust";
+
+fn brand_lockup_width() -> u16 {
+    BRAND_ICON.chars().count() as u16 + 2 + BRAND_WORDMARK.chars().count() as u16
+}
+
+fn current_brand_icon(animation: &AnimatedTextState) -> &'static str {
+    if animation.frame < 128 {
+        BRAND_ICON
+    } else {
+        BRAND_ICON_ALT
+    }
+}
 
 impl ReviewCounts {
     fn bump(&mut self, status: &ReviewStatus) {
@@ -263,7 +276,8 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
     let mut model_cursor = 0_usize;
 
     loop {
-        app.logo_animation.tick_with_text_width(BRAND_WORDMARK.chars().count());
+        app.logo_animation
+            .tick_with_text_width(usize::from(brand_lockup_width()));
 
         while let Ok(message) = app.rx.try_recv() {
             match message {
@@ -724,6 +738,7 @@ fn draw(
 }
 
 fn draw_top_bar(frame: &mut ratatui::Frame, area: Rect, app: &App) {
+    let brand_width = brand_lockup_width();
     let status = match app.run_state {
         RunState::Ready => Span::styled(
             "READY",
@@ -735,7 +750,7 @@ fn draw_top_bar(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             "RUNNING",
             Style::default()
                 .fg(styles::BASE_BG)
-                .bg(styles::ACCENT)
+                .bg(styles::ACCENT_BRIGHT)
                 .add_modifier(Modifier::BOLD),
         ),
         RunState::Failed => Span::styled(
@@ -752,14 +767,14 @@ fn draw_top_bar(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             "SYNCING",
             Style::default()
                 .fg(styles::BASE_BG)
-                .bg(styles::ACCENT)
+                .bg(styles::ACCENT_BRIGHT)
                 .add_modifier(Modifier::BOLD),
         )
     } else {
         Span::styled(
             "IDLE",
             Style::default()
-                .fg(styles::TEXT_PRIMARY)
+                .fg(styles::ACCENT_BRIGHT)
                 .bg(styles::SURFACE_RAISED),
         )
     };
@@ -771,7 +786,7 @@ fn draw_top_bar(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                 Screen::Home => "HOME",
                 Screen::Review => "REVIEW",
             },
-            styles::muted(),
+            styles::accent_bold(),
         ),
         Span::raw("   "),
         Span::styled(
@@ -782,7 +797,7 @@ fn draw_top_bar(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             styles::muted(),
         ),
         Span::raw("    "),
-        Span::styled("Model ", styles::muted()),
+        Span::styled("Model ", styles::soft_accent()),
         Span::styled(app.current_model_label(), styles::title()),
         Span::raw("   "),
         status,
@@ -792,40 +807,70 @@ fn draw_top_bar(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         Span::styled(app.review_context_label(), styles::muted()),
     ];
 
-    let lines = vec![
-        Line::from(header_spans),
-        Line::from(vec![
-            Span::styled(app.status.as_str(), styles::muted()),
-            Span::raw("    "),
-            Span::styled(
-                format!(
-                    "Unreviewed {}  Accepted {}  Rejected {}",
-                    counts.unreviewed, counts.accepted, counts.rejected
-                ),
-                styles::muted(),
-            ),
-        ]),
-    ];
-
-    let paragraph = Paragraph::new(lines).block(
-        Block::default()
-            .borders(Borders::BOTTOM)
-            .border_style(Style::default().fg(styles::BORDER_MUTED)),
-    );
-    frame.render_widget(paragraph, area);
-
-    let brand_area = Rect::new(area.x + 1, area.y, 18, 1);
+    let brand_area = Rect::new(area.x + 1, area.y, brand_width, 1);
     render_brand_lockup(frame, brand_area, app, Alignment::Left);
+
+    let content_offset = brand_width + 4;
+    if area.width > content_offset {
+        let lines = vec![
+            Line::from(header_spans),
+            Line::from(vec![
+                Span::styled(app.status.as_str(), styles::muted()),
+                Span::raw("    "),
+                Span::styled(
+                    format!(
+                        "Unreviewed {}  Accepted {}  Rejected {}",
+                        counts.unreviewed, counts.accepted, counts.rejected
+                    ),
+                    styles::soft_accent(),
+                ),
+            ]),
+        ];
+
+        let content_area = Rect::new(
+            area.x + content_offset,
+            area.y,
+            area.width.saturating_sub(content_offset),
+            area.height,
+        );
+        frame.render_widget(
+            Paragraph::new(lines).wrap(Wrap { trim: false }),
+            content_area,
+        );
+    }
+
+    if area.width > 0 {
+        frame.render_widget(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .border_style(Style::default().fg(styles::BORDER_MUTED)),
+            area,
+        );
+    }
 }
 
 fn draw_footer(frame: &mut ratatui::Frame, area: Rect) {
     let line = Line::from(vec![
-        Span::styled(
-            "Ctrl+O composer  |  Enter continue  |  Esc home  |  y accept  |  x reject  |  c commit",
-            styles::subtle(),
-        ),
+        Span::styled("Ctrl+O", styles::keybind()),
+        Span::styled(" composer", styles::subtle()),
+        Span::raw("  |  "),
+        Span::styled("Enter", styles::keybind()),
+        Span::styled(" continue", styles::subtle()),
+        Span::raw("  |  "),
+        Span::styled("Esc", styles::keybind()),
+        Span::styled(" home", styles::subtle()),
+        Span::raw("  |  "),
+        Span::styled("y", styles::keybind()),
+        Span::styled(" accept", styles::subtle()),
+        Span::raw("  |  "),
+        Span::styled("x", styles::keybind()),
+        Span::styled(" reject", styles::subtle()),
+        Span::raw("  |  "),
+        Span::styled("c", styles::keybind()),
+        Span::styled(" commit", styles::subtle()),
         Span::raw("    "),
-        Span::styled("Ctrl+C quit", styles::subtle()),
+        Span::styled("Ctrl+C", styles::keybind()),
+        Span::styled(" quit", styles::subtle()),
     ]);
     frame.render_widget(Paragraph::new(line), area);
 }
@@ -859,7 +904,7 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     frame.render_widget(
         Paragraph::new(vec![Line::from(Span::styled(
             "Review agent changes with intent.",
-            styles::muted(),
+            styles::soft_accent(),
         ))])
         .alignment(Alignment::Center),
         sections[1],
@@ -868,7 +913,7 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     let counts = app.review_counts();
     let summary = vec![
         Line::from(vec![
-            Span::styled("Workspace  ", styles::subtle()),
+            Span::styled("Workspace  ", styles::soft_accent()),
             Span::styled(
                 app.repo_path
                     .file_name()
@@ -877,11 +922,11 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                 styles::title(),
             ),
             Span::raw("    "),
-            Span::styled("Model  ", styles::subtle()),
+            Span::styled("Model  ", styles::soft_accent()),
             Span::styled(app.current_model_label(), styles::title()),
         ]),
         Line::from(vec![
-            Span::styled("Review queue  ", styles::subtle()),
+            Span::styled("Review queue  ", styles::soft_accent()),
             Span::styled(
                 format!(
                     "{} files  |  {} unreviewed  |  {} accepted  |  {} rejected",
@@ -897,18 +942,18 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(summary).alignment(Alignment::Center), sections[2]);
 
     let action_lines = vec![
-        Line::from(Span::styled("Start here", styles::title())),
+        Line::from(Span::styled("Start here", styles::accent_bold())),
         Line::from(Span::raw("")),
         Line::from(vec![
-            Span::styled("Ctrl+O", styles::title()),
+            Span::styled("Ctrl+O", styles::keybind()),
             Span::raw("  compose a new agent instruction"),
         ]),
         Line::from(vec![
-            Span::styled("Enter", styles::title()),
+            Span::styled("Enter", styles::keybind()),
             Span::raw("   open the review workspace"),
         ]),
         Line::from(vec![
-            Span::styled("c", styles::title()),
+            Span::styled("c", styles::keybind()),
             Span::raw("       open the commit prompt"),
         ]),
     ];
@@ -985,7 +1030,7 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             let style = if index == app.review.cursor_file {
                 Style::default()
                     .fg(styles::TEXT_PRIMARY)
-                    .bg(styles::SURFACE_RAISED)
+                    .bg(styles::ACCENT_DIM)
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(styles::TEXT_MUTED)
@@ -1004,7 +1049,7 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             .borders(Borders::RIGHT)
             .border_style(
                 Style::default().fg(if app.review.focus == ReviewFocus::Files {
-                    styles::ACCENT
+                    styles::ACCENT_BRIGHT
                 } else {
                     styles::BORDER_MUTED
                 }),
@@ -1037,8 +1082,8 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                 .bg(styles::SURFACE_RAISED);
             if app.review.focus == ReviewFocus::Hunks && app.review.cursor_hunk == index {
                 style = Style::default()
-                    .fg(styles::BASE_BG)
-                    .bg(styles::ACCENT)
+                    .fg(styles::TEXT_PRIMARY)
+                    .bg(styles::ACCENT_DIM)
                     .add_modifier(Modifier::BOLD);
             }
 
@@ -1141,7 +1186,7 @@ fn draw_composer(frame: &mut ratatui::Frame, area: Rect, app: &App, composer: &T
     let block = Block::default()
         .title("New Prompt")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(styles::ACCENT))
+        .border_style(Style::default().fg(styles::ACCENT_BRIGHT))
         .style(Style::default().bg(styles::SURFACE_RAISED));
     frame.render_widget(block, modal);
     frame.render_widget(
@@ -1149,11 +1194,26 @@ fn draw_composer(frame: &mut ratatui::Frame, area: Rect, app: &App, composer: &T
         lines[0],
     );
     frame.render_widget(
-        Paragraph::new("Tab models   Ctrl+T variant   Esc close").style(styles::muted()),
+        Paragraph::new(vec![Line::from(vec![
+            Span::styled("Tab", styles::keybind()),
+            Span::raw(" models   "),
+            Span::styled("Ctrl+T", styles::keybind()),
+            Span::raw(" variant   "),
+            Span::styled("Esc", styles::keybind()),
+            Span::raw(" close"),
+        ])])
+        .style(styles::muted()),
         lines[1],
     );
     frame.render_widget(composer, lines[2]);
-    frame.render_widget(Paragraph::new("Enter run").style(styles::muted()), lines[3]);
+    frame.render_widget(
+        Paragraph::new(vec![Line::from(vec![
+            Span::styled("Enter", styles::keybind()),
+            Span::raw(" run"),
+        ])])
+        .style(styles::muted()),
+        lines[3],
+    );
 }
 
 fn draw_commit_prompt(
@@ -1182,7 +1242,7 @@ fn draw_commit_prompt(
     let block = Block::default()
         .title("Commit Accepted Changes")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(styles::ACCENT))
+        .border_style(Style::default().fg(styles::ACCENT_BRIGHT))
         .style(Style::default().bg(styles::SURFACE_RAISED));
     frame.render_widget(block, modal);
     frame.render_widget(
@@ -1194,7 +1254,14 @@ fn draw_commit_prompt(
         lines[0],
     );
     frame.render_widget(
-        Paragraph::new("Commit prompt active  |  Enter commit  |  Esc close").style(styles::muted()),
+        Paragraph::new(vec![Line::from(vec![
+            Span::raw("Commit prompt active  |  "),
+            Span::styled("Enter", styles::keybind()),
+            Span::raw(" commit  |  "),
+            Span::styled("Esc", styles::keybind()),
+            Span::raw(" close"),
+        ])])
+        .style(styles::muted()),
         lines[1],
     );
     frame.render_widget(commit_message, lines[2]);
@@ -1217,7 +1284,7 @@ fn draw_model_picker(
     let block = Block::default()
         .title("Choose Model")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(styles::ACCENT))
+        .border_style(Style::default().fg(styles::ACCENT_BRIGHT))
         .style(Style::default().bg(styles::SURFACE_RAISED));
     frame.render_widget(block, modal);
 
@@ -1258,7 +1325,7 @@ fn draw_model_picker(
         let style = if index == model_cursor {
             Style::default()
                 .fg(styles::TEXT_PRIMARY)
-                .bg(styles::SURFACE)
+                .bg(styles::ACCENT_DIM)
         } else {
             Style::default().fg(styles::TEXT_MUTED)
         };
@@ -1288,7 +1355,13 @@ fn draw_model_picker(
     let mut model_list_state = ListState::default().with_selected(selected_row);
     frame.render_stateful_widget(List::new(rows), sections[1], &mut model_list_state);
     frame.render_widget(
-        Paragraph::new("Enter select   Esc back").style(styles::muted()),
+        Paragraph::new(vec![Line::from(vec![
+            Span::styled("Enter", styles::keybind()),
+            Span::raw(" select   "),
+            Span::styled("Esc", styles::keybind()),
+            Span::raw(" back"),
+        ])])
+        .style(styles::muted()),
         sections[2],
     );
 }
@@ -1361,31 +1434,38 @@ fn render_brand_lockup(
     app: &App,
     alignment: Alignment,
 ) {
-    let width = BRAND_ICON.chars().count() as u16 + 2 + BRAND_WORDMARK.chars().count() as u16;
+    let width = brand_lockup_width();
+    let icon = current_brand_icon(&app.logo_animation);
     let x = match alignment {
         Alignment::Center => area.x + area.width.saturating_sub(width) / 2,
         Alignment::Right => area.x + area.width.saturating_sub(width),
         Alignment::Left => area.x,
     };
-    let icon_area = Rect::new(x, area.y, BRAND_ICON.chars().count() as u16, 1);
+    let icon_area = Rect::new(x, area.y, icon.chars().count() as u16, 1);
     let word_area = Rect::new(
-        x + BRAND_ICON.chars().count() as u16 + 2,
+        x + icon.chars().count() as u16 + 2,
         area.y,
         BRAND_WORDMARK.chars().count() as u16,
         1,
     );
 
-    AnimatedText::new(BRAND_ICON, &app.logo_animation)
+    let icon_style = if icon == BRAND_ICON_ALT {
+        AnimatedTextStyle::pulse(styles::SUCCESS, styles::ACCENT_BRIGHT)
+            .modifiers(Modifier::BOLD)
+    } else {
+        AnimatedTextStyle::pulse(styles::ACCENT, styles::ACCENT_BRIGHT)
+            .modifiers(Modifier::BOLD)
+    };
+
+    AnimatedText::new(icon, &app.logo_animation)
         .style(
-            AnimatedTextStyle::wave(styles::TEXT_MUTED, styles::TEXT_PRIMARY)
-                .modifiers(Modifier::BOLD)
-                .wave_width(1),
+            icon_style,
         )
         .render(icon_area, frame.buffer_mut());
 
     AnimatedText::new(BRAND_WORDMARK, &app.logo_animation)
         .style(
-            AnimatedTextStyle::wave(styles::TEXT_MUTED, styles::TEXT_PRIMARY)
+            AnimatedTextStyle::wave(styles::TEXT_MUTED, styles::ACCENT_BRIGHT)
                 .modifiers(Modifier::BOLD)
                 .wave_width(4),
         )
@@ -1410,14 +1490,8 @@ fn draw_home_brand(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     frame.render_widget(
         Paragraph::new(BRAND_TAGLINE)
             .alignment(Alignment::Center)
-            .style(styles::muted()),
+            .style(styles::soft_accent()),
         sections[3],
-    );
-    frame.render_widget(
-        Paragraph::new("A review lens for agent-generated diffs.")
-            .alignment(Alignment::Center)
-            .style(styles::subtle()),
-        sections[4],
     );
 }
 
