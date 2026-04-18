@@ -95,6 +95,7 @@ struct ReviewUiState {
     files: Vec<FileDiff>,
     cursor_file: usize,
     cursor_hunk: usize,
+    cursor_line: usize,
     focus: ReviewFocus,
     session_only: bool,
 }
@@ -354,6 +355,7 @@ async fn submit_commit_message(app: &mut App, commit_message: &mut TextArea<'sta
     app.review.files = files;
     app.review.cursor_file = 0;
     app.review.cursor_hunk = 0;
+    app.review.cursor_line = 0;
     app.review.focus = ReviewFocus::Files;
     app.overlay = Overlay::None;
     app.status = "Committed accepted changes.".to_string();
@@ -397,6 +399,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                         app.review.files = run.changed_files;
                         app.review.cursor_file = 0;
                         app.review.cursor_hunk = 0;
+                        app.review.cursor_line = 0;
                         app.review.focus = ReviewFocus::Files;
                         app.review.session_only = app.session_snapshot.is_some();
                         app.screen = if app.review.files.is_empty() {
@@ -433,6 +436,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                         match result {
                             Ok(()) => {
                                 *file = updated_file;
+                                sync_cursor_line_to_hunk(&mut app.review);
                                 app.status = success_status;
                             }
                             Err(err) => {
@@ -581,7 +585,10 @@ async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
     }
 
     match key.code {
-        KeyCode::Enter => app.review.focus = ReviewFocus::Hunks,
+        KeyCode::Enter => {
+            app.review.focus = ReviewFocus::Hunks;
+            sync_cursor_line_to_hunk(&mut app.review);
+        }
         KeyCode::Esc => {
             if app.review.focus == ReviewFocus::Hunks {
                 app.review.focus = ReviewFocus::Files;
@@ -594,8 +601,9 @@ async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
             if app.review.focus == ReviewFocus::Files {
                 app.review.cursor_file = app.review.cursor_file.saturating_sub(1);
                 app.review.cursor_hunk = 0;
+                app.review.cursor_line = 0;
             } else {
-                app.review.cursor_hunk = app.review.cursor_hunk.saturating_sub(1);
+                move_review_cursor_by_line(app, -1);
             }
         }
         KeyCode::Down | KeyCode::Char('j') => {
@@ -603,11 +611,10 @@ async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 if app.review.cursor_file + 1 < app.review.files.len() {
                     app.review.cursor_file += 1;
                     app.review.cursor_hunk = 0;
+                    app.review.cursor_line = 0;
                 }
-            } else if let Some(file) = app.review.files.get(app.review.cursor_file) {
-                if app.review.cursor_hunk + 1 < file.hunks.len() {
-                    app.review.cursor_hunk += 1;
-                }
+            } else {
+                move_review_cursor_by_line(app, 1);
             }
         }
         KeyCode::Tab => {
@@ -615,6 +622,7 @@ async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 if let Some(file) = app.review.files.get(app.review.cursor_file) {
                     if !file.hunks.is_empty() {
                         app.review.cursor_hunk = (app.review.cursor_hunk + 1) % file.hunks.len();
+                        sync_cursor_line_to_hunk(&mut app.review);
                     }
                 }
             }
@@ -789,7 +797,7 @@ fn draw_top_bar(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         .constraints([Constraint::Length(1), Constraint::Length(1)])
         .split(content);
 
-    render_brand_lockup(frame, sections[0], app, Alignment::Left);
+    render_brand_lockup(frame, area, app, Alignment::Center);
 
     let run_status = match app.run_state {
         RunState::Ready => "ready",
@@ -816,7 +824,7 @@ fn draw_top_bar(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         Span::raw("  |  "),
         Span::styled(app.review_context_label(), styles::muted()),
     ]);
-    frame.render_widget(Paragraph::new(meta), sections[1]);
+    frame.render_widget(Paragraph::new(meta).alignment(Alignment::Center), sections[1]);
 
     if area.width > 0 {
         frame.render_widget(
@@ -1058,19 +1066,23 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         Span::raw("  |  "),
         Span::styled(app.status.as_str(), styles::muted()),
     ])];
-    let mut hunk_starts = Vec::new();
+    let mut line_hunks = vec![None];
 
     if let Some(file) = app.review.files.get(app.review.cursor_file) {
         for (index, hunk) in file.hunks.iter().enumerate() {
-            hunk_starts.push((index, diff_lines.len()));
+            let is_current_hunk = app.review.focus == ReviewFocus::Hunks && app.review.cursor_hunk == index;
+            let is_current_line = app.review.focus == ReviewFocus::Hunks && app.review.cursor_line == diff_lines.len();
             let mut style = Style::default()
                 .fg(styles::TEXT_PRIMARY)
                 .bg(styles::SURFACE_RAISED);
-            if app.review.focus == ReviewFocus::Hunks && app.review.cursor_hunk == index {
+            if is_current_hunk {
                 style = Style::default()
                     .fg(styles::TEXT_PRIMARY)
                     .bg(styles::ACCENT_DIM)
                     .add_modifier(Modifier::BOLD);
+            }
+            if is_current_line {
+                style = style.add_modifier(Modifier::UNDERLINED);
             }
 
             let status = match hunk.review_status {
@@ -1090,7 +1102,9 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                 ),
                 status,
             ]));
+            line_hunks.push(Some(index));
             for line in &hunk.lines {
+                let is_current_line = app.review.focus == ReviewFocus::Hunks && app.review.cursor_line == diff_lines.len();
                 let prefix = match line.kind {
                     DiffLineKind::Add => "+",
                     DiffLineKind::Remove => "-",
@@ -1100,6 +1114,11 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                     DiffLineKind::Add => Style::default().fg(styles::SUCCESS),
                     DiffLineKind::Remove => Style::default().fg(styles::DANGER),
                     DiffLineKind::Context => Style::default().fg(styles::TEXT_MUTED),
+                };
+                let style = if is_current_line {
+                    style.bg(styles::SURFACE_RAISED).add_modifier(Modifier::UNDERLINED)
+                } else {
+                    style
                 };
                 let old = line
                     .old_line
@@ -1114,34 +1133,32 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                     Span::styled(prefix, style),
                     Span::styled(line.content.clone(), style),
                 ]));
+                line_hunks.push(Some(index));
             }
             diff_lines.push(Line::from(Span::raw("")));
+            line_hunks.push(Some(index));
         }
     }
 
-    let diff_scroll = diff_scroll_offset(app, sections[1], &diff_lines, &hunk_starts);
+    let diff_scroll = diff_scroll_offset(app, sections[1], &diff_lines);
     let diff = Paragraph::new(diff_lines)
         .scroll((diff_scroll, 0))
         .wrap(Wrap { trim: false });
     frame.render_widget(diff, sections[1]);
+
+    if app.review.focus == ReviewFocus::Hunks {
+        if let Some(Some(hunk_index)) = line_hunks.get(app.review.cursor_line) {
+            if *hunk_index != app.review.cursor_hunk {
+                // draw-time sync only reflects current position; input handlers keep state authoritative
+            }
+        }
+    }
 }
 
-fn diff_scroll_offset(
-    app: &App,
-    area: Rect,
-    diff_lines: &[Line<'_>],
-    hunk_starts: &[(usize, usize)],
-) -> u16 {
+fn diff_scroll_offset(app: &App, area: Rect, diff_lines: &[Line<'_>]) -> u16 {
     if app.review.focus != ReviewFocus::Hunks {
         return 0;
     }
-
-    let Some((_, selected_line)) = hunk_starts
-        .iter()
-        .find(|(index, _)| *index == app.review.cursor_hunk)
-    else {
-        return 0;
-    };
 
     let visible_height = usize::from(area.height.max(1));
     if visible_height == 0 {
@@ -1150,7 +1167,7 @@ fn diff_scroll_offset(
 
     let total_lines = diff_lines.len();
     let max_scroll = total_lines.saturating_sub(visible_height);
-    let preferred_top = selected_line.saturating_sub(visible_height.saturating_sub(3));
+    let preferred_top = app.review.cursor_line.saturating_sub(visible_height.saturating_sub(3));
     preferred_top.min(max_scroll).min(u16::MAX as usize) as u16
 }
 
@@ -1404,6 +1421,73 @@ fn sanitize_variant_display(value: &str) -> String {
         String::new()
     } else {
         sanitize_model_display(value)
+    }
+}
+
+fn review_render_line_count(file: &FileDiff) -> usize {
+    1 + file
+        .hunks
+        .iter()
+        .map(|hunk| 2 + hunk.lines.len())
+        .sum::<usize>()
+}
+
+fn hunk_line_start(file: &FileDiff, hunk_index: usize) -> usize {
+    let mut line = 1;
+    for (index, hunk) in file.hunks.iter().enumerate() {
+        if index == hunk_index {
+            return line;
+        }
+        line += 2 + hunk.lines.len();
+    }
+    0
+}
+
+fn hunk_index_for_line(file: &FileDiff, line_index: usize) -> usize {
+    if file.hunks.is_empty() {
+        return 0;
+    }
+
+    let mut current_line = 1;
+    let mut current_hunk = 0;
+    for (index, hunk) in file.hunks.iter().enumerate() {
+        let hunk_end = current_line + hunk.lines.len();
+        if line_index <= hunk_end {
+            return index;
+        }
+        current_line = hunk_end + 1;
+        current_hunk = index;
+    }
+    current_hunk
+}
+
+fn sync_cursor_line_to_hunk(review: &mut ReviewUiState) {
+    let Some(file) = review.files.get(review.cursor_file) else {
+        review.cursor_line = 0;
+        return;
+    };
+
+    if file.hunks.is_empty() {
+        review.cursor_line = 0;
+        review.cursor_hunk = 0;
+        return;
+    }
+
+    review.cursor_hunk = review.cursor_hunk.min(file.hunks.len().saturating_sub(1));
+    review.cursor_line = hunk_line_start(file, review.cursor_hunk);
+}
+
+fn move_review_cursor_by_line(app: &mut App, delta: isize) {
+    let Some(file) = app.review.files.get(app.review.cursor_file) else {
+        return;
+    };
+
+    let max_line = review_render_line_count(file).saturating_sub(1) as isize;
+    let next_line = (app.review.cursor_line as isize + delta).clamp(0, max_line) as usize;
+    app.review.cursor_line = next_line;
+
+    if !file.hunks.is_empty() {
+        app.review.cursor_hunk = hunk_index_for_line(file, next_line);
     }
 }
 
