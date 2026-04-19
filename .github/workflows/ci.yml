@@ -11,15 +11,17 @@ permissions:
 
 jobs:
   checks:
-    name: Format, lint, test, and coverage
+    name: CI / ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - name: ubuntu
+            os: ubuntu-latest
             run_coverage: true
-          - os: macos-14
+          - name: macos
+            os: macos-14
             run_coverage: false
     env:
       CARGO_TERM_COLOR: always
