@@ -8,7 +8,7 @@
 
 Run your coding agent, inspect the resulting diff in a focused fullscreen TUI, accept/reject by file or hunk, and commit only what you approve.
 
-[Demo](#demo) • [Features](#features) • [Quick Start](#quick-start) • [Safety Model](#safety-model) • [Architecture](#architecture) • [Development](#development)
+[Demo](#demo) • [Features](#features) • [Installation](#installation) • [Quick Start](#quick-start) • [Architecture](#architecture) • [Development](#development)
 
 </div>
 
@@ -54,20 +54,52 @@ Coding agents accelerate implementation, but they also make it easy to skip inte
 - **Accepted-only commit path**: commit exactly what you approved
 - **Workspace protection**: preserve unrelated dirty/staged work from before the run
 - **Non-destructive reject semantics**: reject controls commit eligibility rather than nuking your worktree
-- **Pure review workflow**: run `opencode` however you like, then use `better-review` to inspect and gate the result
+- **Pure review workflow**: run your coding agent however you like, then use `better-review` to inspect and gate the result
 - **Fullscreen terminal UX**: home screen, review panes, and commit modal
 - **Terminal safety guardrails**: alternate screen and scrollback purge during app lifecycle
+
+## Installation
+
+### One-command install (no Rust required)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Ricardo-Ceia/better-review/main/install.sh | sh
+```
+
+### Install a specific release
+
+```bash
+BETTER_REVIEW_VERSION=v0.1.0 curl -fsSL https://raw.githubusercontent.com/Ricardo-Ceia/better-review/main/install.sh | sh
+```
+
+### Custom install location
+
+```bash
+BETTER_REVIEW_BIN_DIR="$HOME/.local/bin" curl -fsSL https://raw.githubusercontent.com/Ricardo-Ceia/better-review/main/install.sh | sh
+```
+
+Environment variables:
+
+- `BETTER_REVIEW_VERSION`: release tag (defaults to `latest`)
+- `BETTER_REVIEW_REPO`: alternate `owner/repo` for forks
+- `BETTER_REVIEW_BIN_DIR`: exact destination directory for the binary
+- `BETTER_REVIEW_INSTALL_PREFIX`: installs to `<prefix>/bin` when `BETTER_REVIEW_BIN_DIR` is unset
 
 ## Quick Start
 
 ### Prerequisites
 
-- Rust toolchain
 - `git`
-- `opencode` available on `PATH`
-- A git repository to review
+- A git repository with changes to review
+- Optional: your preferred coding agent (`opencode`, Claude Code, etc.)
 
-### Run from source
+### Run the installed binary
+
+```bash
+better-review
+```
+
+### Run from source (Rust required)
 
 ```bash
 cargo run
@@ -128,6 +160,17 @@ cargo run
 cargo test -- --nocapture
 ```
 
+### Release process
+
+- Push a version tag like `v0.1.0` to trigger `.github/workflows/release.yml`
+- The workflow builds Linux + macOS binaries, packages `tar.gz` archives, and uploads `.sha256` checksums
+- `install.sh` downloads those release artifacts (`latest` by default)
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
 ## FAQ
 
 ### Does this replace git?
@@ -136,8 +179,8 @@ No. `better-review` is a review surface and commit gate on top of your existing 
 
 ### Can I use it in a dirty repository?
 
-Yes. The snapshot model is specifically designed to protect preexisting dirty/staged work.
+Yes. `better-review` is designed to preserve preexisting dirty/staged work and only gate what is commit-eligible.
 
 ### Why not just `git add -p`?
 
-`git add -p` is powerful, but `better-review` is optimized for the agent workflow: use `opencode`, return to a focused review surface, decide quickly, and commit accepted changes only.
+`git add -p` is powerful, but `better-review` is optimized for the agent workflow: run your coding agent, return to a focused review surface, decide quickly, and commit accepted changes only.

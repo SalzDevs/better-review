@@ -105,7 +105,8 @@ impl App {
         let mut app = Self {
             repo_path,
             git,
-            status: "Run opencode elsewhere, then open better-review to review changes.".to_string(),
+            status: "Run your coding agent elsewhere, then open better-review to review changes."
+                .to_string(),
             screen: Screen::Home,
             review: ReviewUiState::default(),
             overlay: Overlay::None,
@@ -299,7 +300,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                         if key.code == KeyCode::Enter && app.screen == Screen::Home {
                             if app.review.files.is_empty() {
                                 app.status =
-                                    "No reviewable changes yet. Run opencode, then reopen better-review."
+                                    "No reviewable changes yet. Run your coding agent, then reopen better-review."
                                     .to_string();
                             } else {
                                 app.screen = Screen::Review;
@@ -623,11 +624,11 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             Line::from(Span::styled("No code changes yet", styles::title())),
             Line::from(Span::raw("")),
             Line::from(Span::styled(
-                "Run opencode in another pane or window, then come back here to review.",
+                "Run your coding agent in another pane or window, then come back here to review.",
                 styles::muted(),
             )),
             Line::from(Span::styled(
-                "Relaunch better-review after opencode finishes to load new changes.",
+                "Relaunch better-review after your agent finishes to load new changes.",
                 styles::muted(),
             )),
         ])

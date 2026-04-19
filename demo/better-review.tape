@@ -26,33 +26,33 @@ Type "tmpdir=$(mktemp -d); cp -R demo/fixture/. $tmpdir; git -C $tmpdir init -q;
 Enter
 Type "cat > $tmpdir/src/lib.rs <<'EOF'"
 Enter
-Type "pub fn greeting(name: &str) -> String {"
+Type "pub fn greeting(name: &str) -> usize {"
 Enter
-Type "    format!(\"Hello, {name}. Review before you commit.\")"
-Enter
-Type "}"
-Enter
-Type ""
-Enter
-Type "pub fn headline() -> String {"
-Enter
-Type "    \"Review queue ready.\".to_string()"
+Type "    name.len()"
 Enter
 Type "}"
 Enter
 Type ""
 Enter
-Type "pub fn summary(items: &[&str]) -> String {"
+Type "pub fn headline(items: &[&str]) -> usize {"
 Enter
-Type "    items.join(\", \")"
+Type "    items.len()"
 Enter
 Type "}"
 Enter
 Type ""
 Enter
-Type "pub fn footer() -> &'static str {"
+Type "pub fn summary(values: &[i32]) -> i32 {"
 Enter
-Type "    \"Accepted changes only.\""
+Type "    values.iter().sum()"
+Enter
+Type "}"
+Enter
+Type ""
+Enter
+Type "pub fn footer(values: &[i32]) -> i32 {"
+Enter
+Type "    values.iter().product()"
 Enter
 Type "}"
 Enter
@@ -60,11 +60,9 @@ Type "EOF"
 Enter
 Type "cat > $tmpdir/src/review_queue.rs <<'EOF'"
 Enter
-Type "pub fn pending_summary(total: usize, accepted: usize) -> String {"
+Type "pub fn pending_summary(total: usize, accepted: usize) -> usize {"
 Enter
-Type "    let remaining = total.saturating_sub(accepted);"
-Enter
-Type "    format!(\"{remaining} change(s) still need review\")"
+Type "    total.saturating_sub(accepted)"
 Enter
 Type "}"
 Enter
@@ -72,7 +70,7 @@ Type "EOF"
 Enter
 Type "cd $tmpdir && cargo run --manifest-path /home/ricardo/better-review/Cargo.toml"
 Enter
-Wait+Screen /No code changes yet/
+Wait+Screen /Enter review/
 Show
 
 Sleep 1000ms
@@ -91,6 +89,9 @@ Wait+Screen /\[✓\] src\/lib\.rs/
 Sleep 900ms
 Type "j"
 Sleep 1000ms
+Type "y"
+Wait+Screen /\[✓\] src\/review_queue\.rs/
+Sleep 700ms
 Type "x"
 Wait+Screen /\[x\] src\/review_queue\.rs/
 Sleep 850ms
