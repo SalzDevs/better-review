@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Format, lint, test, and coverage
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy, llvm-tools-preview
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Lint with clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        run: cargo test --locked --all-targets -- --nocapture
+
+      - name: Enforce overall coverage floor
+        run: cargo llvm-cov --locked --all-targets --summary-only --fail-under-lines 65
+
+      - name: Enforce critical module coverage floors
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo llvm-cov --locked --all-targets --json --summary-only --output-path target/coverage-summary.json
+          python3 <<'PY'
+          import json
+          from pathlib import Path
+
+          thresholds = {
+              "src/domain/diff.rs": 100.0,
+              "src/services/git.rs": 97.0,
+              "src/services/parser.rs": 98.0,
+              "src/ui/styles.rs": 100.0,
+          }
+
+          report = json.loads(Path("target/coverage-summary.json").read_text())
+          files = report["data"][0]["files"]
+          coverage_by_name = {
+              Path(file["filename"]).as_posix().split("/better-review/")[-1]: file["summary"]["lines"]["percent"]
+              for file in files
+          }
+
+          failures = []
+          for path, minimum in thresholds.items():
+              actual = coverage_by_name.get(path)
+              if actual is None:
+                  failures.append(f"missing coverage entry for {path}")
+                  continue
+              if actual + 1e-9 < minimum:
+                  failures.append(f"{path}: expected >= {minimum:.2f}%, got {actual:.2f}%")
+
+          if failures:
+              raise SystemExit("\n".join(failures))
+
+          print("Coverage floors satisfied:")
+          for path, minimum in thresholds.items():
+              print(f"- {path}: {coverage_by_name[path]:.2f}% (min {minimum:.2f}%)")
+          PY

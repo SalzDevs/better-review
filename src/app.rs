@@ -2,11 +2,13 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
+};
 use crossterm::execute;
 use crossterm::terminal::{
-    Clear as TerminalClear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
-    enable_raw_mode,
+    Clear as TerminalClear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -39,7 +41,11 @@ pub async fn run() -> Result<()> {
     let result = run_app(&mut terminal).await;
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), DisableMouseCapture, LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
 
     result
@@ -191,7 +197,10 @@ fn new_commit_message_input() -> TextArea<'static> {
     commit_message
 }
 
-async fn submit_commit_message(app: &mut App, commit_message: &mut TextArea<'static>) -> Result<()> {
+async fn submit_commit_message(
+    app: &mut App,
+    commit_message: &mut TextArea<'static>,
+) -> Result<()> {
     let message = commit_message.lines().join("\n").trim().to_string();
     if message.is_empty() {
         app.status = "Write a commit message first.".to_string();
@@ -269,57 +278,52 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
             }
         }
 
-        terminal.draw(|frame| {
-            draw(
-                frame,
-                &app,
-                &commit_message,
-            )
-        })?;
+        terminal.draw(|frame| draw(frame, &app, &commit_message))?;
 
-        if event::poll(Duration::from_millis(16))? {
-            if let Event::Key(key) = event::read()? {
-                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                    break;
-                }
+        if event::poll(Duration::from_millis(16))?
+            && let Event::Key(key) = event::read()?
+        {
+            if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                break;
+            }
 
-                match app.overlay {
-                    Overlay::CommitPrompt => match key.code {
-                        KeyCode::Esc => {
-                            app.overlay = Overlay::None;
-                            app.status = "Commit cancelled. Review remains active.".to_string();
-                        }
-                        KeyCode::Enter => {
-                            submit_commit_message(&mut app, &mut commit_message).await?;
-                        }
-                        _ => {
-                            commit_message.input(to_textarea_input(key));
-                        }
-                    },
-                    Overlay::None => {
-                        if key.code == KeyCode::Enter && app.screen == Screen::Home {
-                            if app.review.files.is_empty() {
-                                app.status =
-                                    "No reviewable changes yet. Run your coding agent, then reopen better-review."
-                                    .to_string();
-                            } else {
-                                app.screen = Screen::Review;
-                                app.status = "Review workspace ready.".to_string();
-                            }
-                            continue;
-                        }
-
-                        if key.code == KeyCode::Char('c') {
-                            if app.review_busy {
-                                app.status = "Wait for the current review update to finish.".to_string();
-                            } else {
-                                commit_message = app.open_commit_prompt();
-                            }
-                            continue;
-                        }
-
-                        handle_review_key(&mut app, key).await?;
+            match app.overlay {
+                Overlay::CommitPrompt => match key.code {
+                    KeyCode::Esc => {
+                        app.overlay = Overlay::None;
+                        app.status = "Commit cancelled. Review remains active.".to_string();
                     }
+                    KeyCode::Enter => {
+                        submit_commit_message(&mut app, &mut commit_message).await?;
+                    }
+                    _ => {
+                        commit_message.input(to_textarea_input(key));
+                    }
+                },
+                Overlay::None => {
+                    if key.code == KeyCode::Enter && app.screen == Screen::Home {
+                        if app.review.files.is_empty() {
+                            app.status =
+                                "No reviewable changes yet. Run your coding agent, then reopen better-review."
+                                    .to_string();
+                        } else {
+                            app.screen = Screen::Review;
+                            app.status = "Review workspace ready.".to_string();
+                        }
+                        continue;
+                    }
+
+                    if key.code == KeyCode::Char('c') {
+                        if app.review_busy {
+                            app.status =
+                                "Wait for the current review update to finish.".to_string();
+                        } else {
+                            commit_message = app.open_commit_prompt();
+                        }
+                        continue;
+                    }
+
+                    handle_review_key(&mut app, key).await?;
                 }
             }
         }
@@ -378,14 +382,12 @@ async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 move_review_cursor_by_line(app, 1);
             }
         }
-        KeyCode::Tab => {
-            if app.review.focus == ReviewFocus::Hunks {
-                if let Some(file) = app.review.files.get(app.review.cursor_file) {
-                    if !file.hunks.is_empty() {
-                        app.review.cursor_hunk = (app.review.cursor_hunk + 1) % file.hunks.len();
-                        sync_cursor_line_to_hunk(&mut app.review);
-                    }
-                }
+        KeyCode::Tab if app.review.focus == ReviewFocus::Hunks => {
+            if let Some(file) = app.review.files.get(app.review.cursor_file)
+                && !file.hunks.is_empty()
+            {
+                app.review.cursor_hunk = (app.review.cursor_hunk + 1) % file.hunks.len();
+                sync_cursor_line_to_hunk(&mut app.review);
             }
         }
         KeyCode::Char('y') => {
@@ -396,33 +398,33 @@ async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
                         Err(err) => app.status = format!("Could not accept file: {err}"),
                     }
                 }
-            } else if let Some(file) = app.review.files.get_mut(app.review.cursor_file) {
-                if file.hunks.get(app.review.cursor_hunk).is_some() {
-                    let file_index = app.review.cursor_file;
-                    let original_file = file.clone();
-                    let mut updated_file = file.clone();
-                    updated_file.hunks[app.review.cursor_hunk].review_status = ReviewStatus::Accepted;
-                    updated_file.sync_review_status();
+            } else if let Some(file) = app.review.files.get_mut(app.review.cursor_file)
+                && file.hunks.get(app.review.cursor_hunk).is_some()
+            {
+                let file_index = app.review.cursor_file;
+                let original_file = file.clone();
+                let mut updated_file = file.clone();
+                updated_file.hunks[app.review.cursor_hunk].review_status = ReviewStatus::Accepted;
+                updated_file.sync_review_status();
 
-                    let tx = app.tx.clone();
-                    let git = app.git.clone();
-                    app.review_busy = true;
-                    app.status = "Applying accepted hunk...".to_string();
+                let tx = app.tx.clone();
+                let git = app.git.clone();
+                app.review_busy = true;
+                app.status = "Applying accepted hunk...".to_string();
 
-                    tokio::spawn(async move {
-                        let result = git
-                            .sync_file_hunks_to_index(&updated_file)
-                            .await
-                            .map_err(|err| format!("Could not accept hunk: {err}"));
-                        let _ = tx.send(Message::HunkSyncFinished {
-                            file_index,
-                            original_file,
-                            updated_file,
-                            success_status: "Accepted hunk.".to_string(),
-                            result,
-                        });
+                tokio::spawn(async move {
+                    let result = git
+                        .sync_file_hunks_to_index(&updated_file)
+                        .await
+                        .map_err(|err| format!("Could not accept hunk: {err}"));
+                    let _ = tx.send(Message::HunkSyncFinished {
+                        file_index,
+                        original_file,
+                        updated_file,
+                        success_status: "Accepted hunk.".to_string(),
+                        result,
                     });
-                }
+                });
             }
         }
         KeyCode::Char('x') => {
@@ -435,33 +437,33 @@ async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
                         Err(err) => app.status = format!("Could not reject file: {err}"),
                     }
                 }
-            } else if let Some(file) = app.review.files.get_mut(app.review.cursor_file) {
-                if file.hunks.get(app.review.cursor_hunk).is_some() {
-                    let file_index = app.review.cursor_file;
-                    let original_file = file.clone();
-                    let mut updated_file = file.clone();
-                    updated_file.hunks[app.review.cursor_hunk].review_status = ReviewStatus::Rejected;
-                    updated_file.sync_review_status();
+            } else if let Some(file) = app.review.files.get_mut(app.review.cursor_file)
+                && file.hunks.get(app.review.cursor_hunk).is_some()
+            {
+                let file_index = app.review.cursor_file;
+                let original_file = file.clone();
+                let mut updated_file = file.clone();
+                updated_file.hunks[app.review.cursor_hunk].review_status = ReviewStatus::Rejected;
+                updated_file.sync_review_status();
 
-                    let tx = app.tx.clone();
-                    let git = app.git.clone();
-                    app.review_busy = true;
-                    app.status = "Rejecting hunk...".to_string();
+                let tx = app.tx.clone();
+                let git = app.git.clone();
+                app.review_busy = true;
+                app.status = "Rejecting hunk...".to_string();
 
-                    tokio::spawn(async move {
-                        let result = git
-                            .sync_file_hunks_to_index(&updated_file)
-                            .await
-                            .map_err(|err| format!("Could not reject hunk: {err}"));
-                        let _ = tx.send(Message::HunkSyncFinished {
-                            file_index,
-                            original_file,
-                            updated_file,
-                            success_status: "Rejected hunk.".to_string(),
-                            result,
-                        });
+                tokio::spawn(async move {
+                    let result = git
+                        .sync_file_hunks_to_index(&updated_file)
+                        .await
+                        .map_err(|err| format!("Could not reject hunk: {err}"));
+                    let _ = tx.send(Message::HunkSyncFinished {
+                        file_index,
+                        original_file,
+                        updated_file,
+                        success_status: "Rejected hunk.".to_string(),
+                        result,
                     });
-                }
+                });
             }
         }
         KeyCode::Char('u') => {
@@ -480,11 +482,7 @@ async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
     Ok(())
 }
 
-fn draw(
-    frame: &mut ratatui::Frame,
-    app: &App,
-    commit_message: &TextArea<'_>,
-) {
+fn draw(frame: &mut ratatui::Frame, app: &App, commit_message: &TextArea<'_>) {
     let size = frame.area();
     let header_height = if app.screen == Screen::Review { 1 } else { 2 };
     let layout = Layout::default()
@@ -576,7 +574,10 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         Span::styled("mode ", styles::subtle()),
         Span::styled("review", styles::title()),
     ]);
-    frame.render_widget(Paragraph::new(summary).alignment(Alignment::Center), sections[2]);
+    frame.render_widget(
+        Paragraph::new(summary).alignment(Alignment::Center),
+        sections[2],
+    );
 
     let queue = Line::from(vec![
         Span::styled("queue ", styles::subtle()),
@@ -591,7 +592,10 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             styles::muted(),
         ),
     ]);
-    frame.render_widget(Paragraph::new(queue).alignment(Alignment::Center), sections[3]);
+    frame.render_widget(
+        Paragraph::new(queue).alignment(Alignment::Center),
+        sections[3],
+    );
 
     let action_line = Line::from(vec![
         Span::styled("Enter", styles::keybind()),
@@ -724,8 +728,10 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 
     if let Some(file) = app.review.files.get(app.review.cursor_file) {
         for (index, hunk) in file.hunks.iter().enumerate() {
-            let is_current_hunk = app.review.focus == ReviewFocus::Hunks && app.review.cursor_hunk == index;
-            let is_current_line = app.review.focus == ReviewFocus::Hunks && app.review.cursor_line == diff_lines.len();
+            let is_current_hunk =
+                app.review.focus == ReviewFocus::Hunks && app.review.cursor_hunk == index;
+            let is_current_line = app.review.focus == ReviewFocus::Hunks
+                && app.review.cursor_line == diff_lines.len();
             let mut style = Style::default()
                 .fg(styles::TEXT_PRIMARY)
                 .bg(styles::SURFACE_RAISED);
@@ -740,8 +746,12 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             }
 
             let status = match hunk.review_status {
-                ReviewStatus::Accepted => Span::styled(" [accepted]", Style::default().fg(styles::SUCCESS)),
-                ReviewStatus::Rejected => Span::styled(" [rejected]", Style::default().fg(styles::DANGER)),
+                ReviewStatus::Accepted => {
+                    Span::styled(" [accepted]", Style::default().fg(styles::SUCCESS))
+                }
+                ReviewStatus::Rejected => {
+                    Span::styled(" [rejected]", Style::default().fg(styles::DANGER))
+                }
                 ReviewStatus::Unreviewed => Span::styled(" [unreviewed]", styles::muted()),
             };
 
@@ -758,7 +768,8 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             ]));
             line_hunks.push(Some(index));
             for line in &hunk.lines {
-                let is_current_line = app.review.focus == ReviewFocus::Hunks && app.review.cursor_line == diff_lines.len();
+                let is_current_line = app.review.focus == ReviewFocus::Hunks
+                    && app.review.cursor_line == diff_lines.len();
                 let prefix = match line.kind {
                     DiffLineKind::Add => "+",
                     DiffLineKind::Remove => "-",
@@ -770,7 +781,9 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                     DiffLineKind::Context => Style::default().fg(styles::TEXT_MUTED),
                 };
                 let style = if is_current_line {
-                    style.bg(styles::SURFACE_RAISED).add_modifier(Modifier::UNDERLINED)
+                    style
+                        .bg(styles::SURFACE_RAISED)
+                        .add_modifier(Modifier::UNDERLINED)
                 } else {
                     style
                 };
@@ -797,14 +810,6 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     let diff_scroll = diff_scroll_offset(app, sections[1], &diff_lines);
     let diff = Paragraph::new(diff_lines).scroll((diff_scroll, 0));
     frame.render_widget(diff, sections[1]);
-
-    if app.review.focus == ReviewFocus::Hunks {
-        if let Some(Some(hunk_index)) = line_hunks.get(app.review.cursor_line) {
-            if *hunk_index != app.review.cursor_hunk {
-                // draw-time sync only reflects current position; input handlers keep state authoritative
-            }
-        }
-    }
 }
 
 fn diff_scroll_offset(app: &App, area: Rect, diff_lines: &[Line<'_>]) -> u16 {
@@ -819,7 +824,10 @@ fn diff_scroll_offset(app: &App, area: Rect, diff_lines: &[Line<'_>]) -> u16 {
 
     let total_lines = diff_lines.len();
     let max_scroll = total_lines.saturating_sub(visible_height);
-    let preferred_top = app.review.cursor_line.saturating_sub(visible_height.saturating_sub(3));
+    let preferred_top = app
+        .review
+        .cursor_line
+        .saturating_sub(visible_height.saturating_sub(3));
     preferred_top.min(max_scroll).min(u16::MAX as usize) as u16
 }
 
@@ -962,12 +970,7 @@ fn review_marker(
     }
 }
 
-fn render_brand_lockup(
-    frame: &mut ratatui::Frame,
-    area: Rect,
-    app: &App,
-    alignment: Alignment,
-) {
+fn render_brand_lockup(frame: &mut ratatui::Frame, area: Rect, app: &App, alignment: Alignment) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -995,11 +998,9 @@ fn render_brand_lockup(
     let icon_area = Rect::new(x, area.y, icon_width, 1);
 
     let icon_style = if icon == BRAND_ICON_ALT {
-        AnimatedTextStyle::pulse(styles::SUCCESS, styles::ACCENT_BRIGHT)
-            .modifiers(Modifier::BOLD)
+        AnimatedTextStyle::pulse(styles::SUCCESS, styles::ACCENT_BRIGHT).modifiers(Modifier::BOLD)
     } else {
-        AnimatedTextStyle::pulse(styles::ACCENT, styles::ACCENT_BRIGHT)
-            .modifiers(Modifier::BOLD)
+        AnimatedTextStyle::pulse(styles::ACCENT, styles::ACCENT_BRIGHT).modifiers(Modifier::BOLD)
     };
 
     AnimatedText::new(icon, &app.logo_animation)
@@ -1245,11 +1246,26 @@ mod tests {
 
     #[test]
     fn review_marker_and_path_helpers_match_expected_output() {
-        assert_eq!(review_marker(ReviewStatus::Accepted, FileStatus::Modified, false), "[✓]");
-        assert_eq!(review_marker(ReviewStatus::Rejected, FileStatus::Modified, false), "[x]");
-        assert_eq!(review_marker(ReviewStatus::Unreviewed, FileStatus::Added, false), "[+]");
-        assert_eq!(review_marker(ReviewStatus::Unreviewed, FileStatus::Deleted, false), "[-]");
-        assert_eq!(review_marker(ReviewStatus::Unreviewed, FileStatus::Modified, true), "[ ]");
+        assert_eq!(
+            review_marker(ReviewStatus::Accepted, FileStatus::Modified, false),
+            "[✓]"
+        );
+        assert_eq!(
+            review_marker(ReviewStatus::Rejected, FileStatus::Modified, false),
+            "[x]"
+        );
+        assert_eq!(
+            review_marker(ReviewStatus::Unreviewed, FileStatus::Added, false),
+            "[+]"
+        );
+        assert_eq!(
+            review_marker(ReviewStatus::Unreviewed, FileStatus::Deleted, false),
+            "[-]"
+        );
+        assert_eq!(
+            review_marker(ReviewStatus::Unreviewed, FileStatus::Modified, true),
+            "[ ]"
+        );
         assert_eq!(truncate_path("short.rs", 20), "short.rs");
         assert_eq!(truncate_path("very/long/path/file.rs", 10), "...file.rs");
     }
@@ -1302,11 +1318,14 @@ mod tests {
             Line::raw("5"),
             Line::raw("6"),
         ];
-        assert_eq!(diff_scroll_offset(&app, Rect::new(0, 0, 10, 4), &lines), 5_u16.min(3));
+        assert_eq!(diff_scroll_offset(&app, Rect::new(0, 0, 10, 4), &lines), 3);
 
         let mut files_view = app;
         files_view.review.focus = ReviewFocus::Files;
-        assert_eq!(diff_scroll_offset(&files_view, Rect::new(0, 0, 10, 4), &lines), 0);
+        assert_eq!(
+            diff_scroll_offset(&files_view, Rect::new(0, 0, 10, 4), &lines),
+            0
+        );
     }
 
     #[test]

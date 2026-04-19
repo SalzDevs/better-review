@@ -180,6 +180,22 @@ cargo run
 cargo test -- --nocapture
 ```
 
+### Pull request checks
+
+Every PR should pass `.github/workflows/ci.yml`, which enforces:
+
+- `cargo fmt --all --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test --locked --all-targets -- --nocapture`
+- overall line coverage of at least `65%`
+- critical module line coverage floors:
+  - `src/domain/diff.rs`: `100%`
+  - `src/services/git.rs`: `97%`
+  - `src/services/parser.rs`: `98%`
+  - `src/ui/styles.rs`: `100%`
+
+These gates are meant to protect the core review and parser invariants from regressions.
+
 ### Release process
 
 - Push a version tag like `v0.1.0` to trigger `.github/workflows/release.yml`

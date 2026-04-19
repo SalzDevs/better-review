@@ -1,14 +1,9 @@
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ReviewStatus {
+    #[default]
     Unreviewed,
     Accepted,
     Rejected,
-}
-
-impl Default for ReviewStatus {
-    fn default() -> Self {
-        Self::Unreviewed
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,17 +32,12 @@ pub struct Hunk {
     pub review_status: ReviewStatus,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FileStatus {
     Added,
     Deleted,
+    #[default]
     Modified,
-}
-
-impl Default for FileStatus {
-    fn default() -> Self {
-        Self::Modified
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

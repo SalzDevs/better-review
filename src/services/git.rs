@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use tokio::time::{Duration, timeout};
 use tokio::process::Command;
+use tokio::time::{Duration, timeout};
 
 use crate::domain::diff::{FileDiff, ReviewStatus};
 use crate::services::parser::parse_git_diff;
@@ -84,13 +84,24 @@ impl GitService {
         Ok(())
     }
 
-    async fn diff_between_trees(&self, old_tree: &str, new_tree: &str) -> Result<(String, Vec<FileDiff>)> {
+    async fn diff_between_trees(
+        &self,
+        old_tree: &str,
+        new_tree: &str,
+    ) -> Result<(String, Vec<FileDiff>)> {
         if old_tree == new_tree {
             return Ok((String::new(), Vec::new()));
         }
 
         let diff = self
-            .run_git(&["diff", "--no-color", "--no-ext-diff", "--find-renames", old_tree, new_tree])
+            .run_git(&[
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--find-renames",
+                old_tree,
+                new_tree,
+            ])
             .await
             .with_context(|| format!("diff trees {old_tree}..{new_tree}"))?;
         let files = if diff.trim().is_empty() {
@@ -102,7 +113,9 @@ impl GitService {
     }
 
     async fn base_tree(&self) -> Result<String> {
-        let output = self.output_git(&["rev-parse", "--verify", "HEAD^{tree}"]).await?;
+        let output = self
+            .output_git(&["rev-parse", "--verify", "HEAD^{tree}"])
+            .await?;
         if output.status.success() {
             return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
         }
@@ -196,7 +209,10 @@ fn temp_git_index_path() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .map(|value| value.as_nanos())
         .unwrap_or_default();
-    std::env::temp_dir().join(format!("better-review-{}-{unique}.index", std::process::id()))
+    std::env::temp_dir().join(format!(
+        "better-review-{}-{unique}.index",
+        std::process::id()
+    ))
 }
 
 async fn cleanup_temp_index(path: &Path) {
@@ -329,12 +345,22 @@ mod tests {
     async fn sync_file_hunks_stages_only_accepted_hunks() -> Result<()> {
         let temp = tempfile::tempdir()?;
         init_repo(temp.path()).await?;
-        write_file(temp.path(), "tracked.txt", "zero\none\ntwo\nthree\nfour\nfive\n").await?;
+        write_file(
+            temp.path(),
+            "tracked.txt",
+            "zero\none\ntwo\nthree\nfour\nfive\n",
+        )
+        .await?;
         git(temp.path(), &["add", "tracked.txt"]).await?;
         git(temp.path(), &["commit", "-m", "init"]).await?;
 
         let service = GitService::new(temp.path());
-        write_file(temp.path(), "tracked.txt", "ZERO\none\ntwo\nthree\nFOUR\nfive\n").await?;
+        write_file(
+            temp.path(),
+            "tracked.txt",
+            "ZERO\none\ntwo\nthree\nFOUR\nfive\n",
+        )
+        .await?;
         let (_, mut files) = service.collect_diff().await?;
         let file = files
             .iter_mut()
@@ -346,7 +372,8 @@ mod tests {
         file.sync_review_status();
         service.sync_file_hunks_to_index(file).await?;
 
-        let staged_patch = git_stdout(temp.path(), &["diff", "--cached", "--", "tracked.txt"]).await?;
+        let staged_patch =
+            git_stdout(temp.path(), &["diff", "--cached", "--", "tracked.txt"]).await?;
         assert!(staged_patch.contains("+ZERO"));
         assert!(staged_patch.contains("+FOUR"));
         let worktree = tokio::fs::read_to_string(temp.path().join("tracked.txt")).await?;
@@ -488,7 +515,8 @@ mod tests {
 "#;
         service.apply_patch_to_index(first_hunk_patch).await?;
 
-        let staged_before = git_stdout(temp.path(), &["diff", "--cached", "--", "tracked.txt"]).await?;
+        let staged_before =
+            git_stdout(temp.path(), &["diff", "--cached", "--", "tracked.txt"]).await?;
         assert!(staged_before.contains("+ONE"));
         assert!(!staged_before.contains("+TWELVE"));
 
@@ -497,7 +525,10 @@ mod tests {
             .iter_mut()
             .find(|file| file.display_path() == "tracked.txt")
             .expect("tracked file in diff");
-        assert!(file.hunks.len() >= 2, "expected separate hunks for first/last line edits");
+        assert!(
+            file.hunks.len() >= 2,
+            "expected separate hunks for first/last line edits"
+        );
 
         for hunk in &mut file.hunks {
             hunk.review_status = if hunk.old_start == 1 {
@@ -509,7 +540,8 @@ mod tests {
         file.sync_review_status();
         service.sync_file_hunks_to_index(file).await?;
 
-        let staged_after = git_stdout(temp.path(), &["diff", "--cached", "--", "tracked.txt"]).await?;
+        let staged_after =
+            git_stdout(temp.path(), &["diff", "--cached", "--", "tracked.txt"]).await?;
         assert!(staged_after.contains("+ONE"));
         assert!(!staged_after.contains("+TWELVE"));
 
@@ -602,14 +634,22 @@ mod tests {
     }
 
     async fn init_repo(path: &Path) -> Result<()> {
-        Command::new("git").args(["init"]).current_dir(path).output().await?;
+        Command::new("git")
+            .args(["init"])
+            .current_dir(path)
+            .output()
+            .await?;
         git(path, &["config", "user.email", "test@example.com"]).await?;
         git(path, &["config", "user.name", "Test User"]).await?;
         Ok(())
     }
 
     async fn git(path: &Path, args: &[&str]) -> Result<()> {
-        let output = Command::new("git").args(args).current_dir(path).output().await?;
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .await?;
         if !output.status.success() {
             anyhow::bail!(String::from_utf8_lossy(&output.stderr).to_string());
         }
@@ -617,7 +657,11 @@ mod tests {
     }
 
     async fn git_stdout(path: &Path, args: &[&str]) -> Result<String> {
-        let output = Command::new("git").args(args).current_dir(path).output().await?;
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .await?;
         if !output.status.success() {
             anyhow::bail!(String::from_utf8_lossy(&output.stderr).to_string());
         }

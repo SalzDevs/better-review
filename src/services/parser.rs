@@ -13,10 +13,10 @@ pub fn parse_git_diff(diff: &str) -> anyhow::Result<Vec<FileDiff>> {
 
     for line in diff.lines() {
         if let Some(rest) = line.strip_prefix("diff --git ") {
-            if let Some(hunk) = current_hunk.take() {
-                if let Some(file) = current_file.as_mut() {
-                    file.hunks.push(hunk);
-                }
+            if let Some(hunk) = current_hunk.take()
+                && let Some(file) = current_file.as_mut()
+            {
+                file.hunks.push(hunk);
             }
             if let Some(file) = current_file.take() {
                 files.push(file);
@@ -147,10 +147,10 @@ pub fn parse_git_diff(diff: &str) -> anyhow::Result<Vec<FileDiff>> {
         }
     }
 
-    if let Some(hunk) = current_hunk {
-        if let Some(file) = current_file.as_mut() {
-            file.hunks.push(hunk);
-        }
+    if let Some(hunk) = current_hunk
+        && let Some(file) = current_file.as_mut()
+    {
+        file.hunks.push(hunk);
     }
     if let Some(file) = current_file {
         files.push(file);
