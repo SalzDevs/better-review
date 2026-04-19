@@ -12,7 +12,15 @@ permissions:
 jobs:
   checks:
     name: Format, lint, test, and coverage
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            run_coverage: true
+          - os: macos-14
+            run_coverage: false
     env:
       CARGO_TERM_COLOR: always
 
@@ -29,6 +37,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Install cargo-llvm-cov
+        if: matrix.run_coverage
         uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Check formatting
@@ -41,9 +50,11 @@ jobs:
         run: cargo test --locked --all-targets -- --nocapture
 
       - name: Enforce overall coverage floor
+        if: matrix.run_coverage
         run: cargo llvm-cov --locked --all-targets --summary-only --fail-under-lines 65
 
       - name: Enforce critical module coverage floors
+        if: matrix.run_coverage
         shell: bash
         run: |
           set -euo pipefail

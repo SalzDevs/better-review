@@ -484,6 +484,197 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn collect_diff_detects_renamed_files() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        init_repo(temp.path()).await?;
+        write_file(temp.path(), "old_name.txt", "rename me\n").await?;
+        git(temp.path(), &["add", "old_name.txt"]).await?;
+        git(temp.path(), &["commit", "-m", "init"]).await?;
+
+        git(temp.path(), &["mv", "old_name.txt", "new_name.txt"]).await?;
+
+        let service = GitService::new(temp.path());
+        let (_, files) = service.collect_diff().await?;
+        let file = files
+            .iter()
+            .find(|file| file.old_path == "old_name.txt" && file.new_path == "new_name.txt")
+            .expect("renamed file in diff");
+
+        assert!(file.hunks.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn accept_file_stages_mode_only_changes() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        init_repo(temp.path()).await?;
+        write_file(temp.path(), "script.sh", "#!/bin/sh\necho ok\n").await?;
+        git(temp.path(), &["add", "script.sh"]).await?;
+        git(temp.path(), &["commit", "-m", "init"]).await?;
+
+        chmod_plus_x(temp.path(), "script.sh").await?;
+
+        let service = GitService::new(temp.path());
+        let (_, mut files) = service.collect_diff().await?;
+        let file = files
+            .iter_mut()
+            .find(|file| file.display_path() == "script.sh")
+            .expect("mode-changed file in diff");
+
+        assert!(file.hunks.is_empty());
+        service.accept_file(file).await?;
+
+        let summary = git_stdout(temp.path(), &["diff", "--cached", "--summary"]).await?;
+        assert!(summary.contains("mode change"));
+        assert!(summary.contains("script.sh"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn collect_diff_ignores_gitignored_files() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        init_repo(temp.path()).await?;
+        write_file(temp.path(), ".gitignore", "ignored.log\n").await?;
+        git(temp.path(), &["add", ".gitignore"]).await?;
+        git(temp.path(), &["commit", "-m", "add ignore rules"]).await?;
+
+        write_file(temp.path(), "ignored.log", "ignore me\n").await?;
+
+        let service = GitService::new(temp.path());
+        let (_, files) = service.collect_diff().await?;
+        assert!(files.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn accept_file_surfaces_index_lock_errors() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        init_repo(temp.path()).await?;
+        write_file(temp.path(), "tracked.txt", "base\n").await?;
+        git(temp.path(), &["add", "tracked.txt"]).await?;
+        git(temp.path(), &["commit", "-m", "init"]).await?;
+
+        write_file(temp.path(), "tracked.txt", "changed\n").await?;
+
+        let service = GitService::new(temp.path());
+        let (_, mut files) = service.collect_diff().await?;
+        let file = files
+            .iter_mut()
+            .find(|file| file.display_path() == "tracked.txt")
+            .expect("tracked file in diff");
+
+        write_file(temp.path(), ".git/index.lock", "busy\n").await?;
+
+        let err = service
+            .accept_file(file)
+            .await
+            .expect_err("index lock should fail git add");
+        let message = format!("{err:#}");
+        assert!(message.contains("index.lock") || message.contains("Another git process"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn commit_staged_surfaces_pre_commit_hook_failure() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        init_repo(temp.path()).await?;
+        write_file(temp.path(), "tracked.txt", "base\n").await?;
+        git(temp.path(), &["add", "tracked.txt"]).await?;
+        git(temp.path(), &["commit", "-m", "init"]).await?;
+
+        write_file(temp.path(), "tracked.txt", "changed\n").await?;
+        write_hook(
+            temp.path(),
+            "pre-commit",
+            "printf 'hook failed\\n' >&2\nexit 1\n",
+        )
+        .await?;
+
+        let service = GitService::new(temp.path());
+        let (_, mut files) = service.collect_diff().await?;
+        let file = files
+            .iter_mut()
+            .find(|file| file.display_path() == "tracked.txt")
+            .expect("tracked file in diff");
+        service.accept_file(file).await?;
+
+        let err = service
+            .commit_staged("should fail")
+            .await
+            .expect_err("pre-commit hook should reject commit");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("hook failed"),
+            "unexpected hook error: {message}"
+        );
+        assert!(service.has_staged_changes().await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn commit_staged_works_in_detached_head_state() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        init_repo(temp.path()).await?;
+        write_file(temp.path(), "tracked.txt", "base\n").await?;
+        git(temp.path(), &["add", "tracked.txt"]).await?;
+        git(temp.path(), &["commit", "-m", "init"]).await?;
+        git(temp.path(), &["checkout", "--detach"]).await?;
+
+        let service = GitService::new(temp.path());
+        write_file(temp.path(), "tracked.txt", "detached\n").await?;
+        let (_, mut files) = service.collect_diff().await?;
+        let file = files
+            .iter_mut()
+            .find(|file| file.display_path() == "tracked.txt")
+            .expect("tracked file in diff");
+
+        service.accept_file(file).await?;
+        service.commit_staged("detached commit").await?;
+
+        let head = git_stdout(temp.path(), &["log", "-1", "--pretty=%s"]).await?;
+        assert_eq!(head.trim(), "detached commit");
+        let branch = git_stdout(temp.path(), &["rev-parse", "--abbrev-ref", "HEAD"]).await?;
+        assert_eq!(branch.trim(), "HEAD");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn collect_diff_works_inside_linked_worktree() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let repo_path = temp.path().join("repo");
+        let worktree_path = temp.path().join("worktree");
+        tokio::fs::create_dir_all(&repo_path).await?;
+        init_repo(&repo_path).await?;
+        write_file(&repo_path, "tracked.txt", "base\n").await?;
+        git(&repo_path, &["add", "tracked.txt"]).await?;
+        git(&repo_path, &["commit", "-m", "init"]).await?;
+
+        let worktree_path_string = worktree_path.to_string_lossy().into_owned();
+        git(
+            &repo_path,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "review-worktree",
+                &worktree_path_string,
+            ],
+        )
+        .await?;
+
+        write_file(&worktree_path, "tracked.txt", "worktree change\n").await?;
+
+        let service = GitService::new(&worktree_path);
+        let (_, files) = service.collect_diff().await?;
+        assert!(
+            files
+                .iter()
+                .any(|file| file.display_path() == "tracked.txt")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn sync_file_hunks_rewrites_partially_staged_file_from_review_state() -> Result<()> {
         let temp = tempfile::tempdir()?;
         init_repo(temp.path()).await?;
@@ -674,6 +865,30 @@ mod tests {
             tokio::fs::create_dir_all(parent).await?;
         }
         tokio::fs::write(file_path, contents).await?;
+        Ok(())
+    }
+
+    async fn chmod_plus_x(root: &Path, path: &str) -> Result<()> {
+        let output = Command::new("chmod")
+            .args(["+x", path])
+            .current_dir(root)
+            .output()
+            .await?;
+        if !output.status.success() {
+            anyhow::bail!(String::from_utf8_lossy(&output.stderr).to_string());
+        }
+        Ok(())
+    }
+
+    async fn write_hook(root: &Path, hook_name: &str, body: &str) -> Result<()> {
+        let hook_path = format!(".git/hooks/{hook_name}");
+        write_file(
+            root,
+            &hook_path,
+            &format!("#!/usr/bin/env sh\nset -eu\n{body}"),
+        )
+        .await?;
+        chmod_plus_x(root, &hook_path).await?;
         Ok(())
     }
 }

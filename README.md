@@ -217,6 +217,25 @@ No. `better-review` is a review surface and commit gate on top of your existing 
 
 Yes. `better-review` is designed to preserve preexisting dirty/staged work and only gate what is commit-eligible.
 
+### What repository states are supported?
+
+`better-review` is tested against these core states today:
+
+- clean repositories and empty repositories
+- repositories with preexisting dirty or staged changes
+- partially staged files
+- detached `HEAD`
+- linked worktrees
+- rename detection in diffs
+- file mode-only changes
+- pre-commit hook failures and merge-conflict commit failures
+
+Current limitations to keep in mind:
+
+- submodules are not a first-class review surface yet
+- sparse checkouts and unusual index/worktree setups are not explicitly supported yet
+- binary, rename, and copy diffs are recognized, but the UI treatment is still basic
+
 ### Why not just `git add -p`?
 
 `git add -p` is powerful, but `better-review` is optimized for the agent workflow: run your coding agent, return to a focused review surface, decide quickly, and commit accepted changes only.
