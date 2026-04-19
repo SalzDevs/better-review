@@ -354,6 +354,122 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn sync_file_hunks_rewrites_partially_staged_file_from_review_state() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        init_repo(temp.path()).await?;
+        write_file(
+            temp.path(),
+            "tracked.txt",
+            "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\neleven\ntwelve\n",
+        )
+        .await?;
+        git(temp.path(), &["add", "tracked.txt"]).await?;
+        git(temp.path(), &["commit", "-m", "init"]).await?;
+
+        let service = GitService::new(temp.path());
+        write_file(
+            temp.path(),
+            "tracked.txt",
+            "ONE\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\neleven\nTWELVE\n",
+        )
+        .await?;
+
+        let first_hunk_patch = r#"--- a/tracked.txt
++++ b/tracked.txt
+@@ -1,4 +1,4 @@
+-one
++ONE
+ two
+ three
+ four
+"#;
+        service.apply_patch_to_index(first_hunk_patch).await?;
+
+        let staged_before = git_stdout(temp.path(), &["diff", "--cached", "--", "tracked.txt"]).await?;
+        assert!(staged_before.contains("+ONE"));
+        assert!(!staged_before.contains("+TWELVE"));
+
+        let (_, mut files) = service.collect_diff().await?;
+        let file = files
+            .iter_mut()
+            .find(|file| file.display_path() == "tracked.txt")
+            .expect("tracked file in diff");
+        assert!(file.hunks.len() >= 2, "expected separate hunks for first/last line edits");
+
+        for hunk in &mut file.hunks {
+            hunk.review_status = if hunk.old_start == 1 {
+                ReviewStatus::Accepted
+            } else {
+                ReviewStatus::Rejected
+            };
+        }
+        file.sync_review_status();
+        service.sync_file_hunks_to_index(file).await?;
+
+        let staged_after = git_stdout(temp.path(), &["diff", "--cached", "--", "tracked.txt"]).await?;
+        assert!(staged_after.contains("+ONE"));
+        assert!(!staged_after.contains("+TWELVE"));
+
+        let unstaged_after = git_stdout(temp.path(), &["diff", "--", "tracked.txt"]).await?;
+        assert!(unstaged_after.contains("+TWELVE"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn commit_staged_fails_with_unmerged_conflicts() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        init_repo(temp.path()).await?;
+        create_merge_conflict(temp.path()).await?;
+
+        write_file(temp.path(), "ready.txt", "stage me\n").await?;
+        git(temp.path(), &["add", "ready.txt"]).await?;
+
+        let service = GitService::new(temp.path());
+        let err = service
+            .commit_staged("this should fail")
+            .await
+            .expect_err("commit should fail when index has unresolved conflicts");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("unmerged")
+                || message.contains("unresolved conflict")
+                || message.contains("resolve"),
+            "unexpected commit error: {message}"
+        );
+        Ok(())
+    }
+
+    async fn create_merge_conflict(path: &Path) -> Result<()> {
+        write_file(path, "conflict.txt", "base\n").await?;
+        git(path, &["add", "conflict.txt"]).await?;
+        git(path, &["commit", "-m", "base"]).await?;
+
+        let base_branch = git_stdout(path, &["rev-parse", "--abbrev-ref", "HEAD"]).await?;
+        let base_branch = base_branch.trim().to_string();
+
+        git(path, &["checkout", "-b", "feature/conflict"]).await?;
+        write_file(path, "conflict.txt", "feature\n").await?;
+        git(path, &["add", "conflict.txt"]).await?;
+        git(path, &["commit", "-m", "feature change"]).await?;
+
+        git(path, &["checkout", &base_branch]).await?;
+        write_file(path, "conflict.txt", "main\n").await?;
+        git(path, &["add", "conflict.txt"]).await?;
+        git(path, &["commit", "-m", "main change"]).await?;
+
+        let merge = Command::new("git")
+            .args(["merge", "feature/conflict"])
+            .current_dir(path)
+            .output()
+            .await?;
+        if merge.status.success() {
+            anyhow::bail!("expected merge conflict");
+        }
+
+        Ok(())
+    }
+
     async fn init_repo(path: &Path) -> Result<()> {
         Command::new("git").args(["init"]).current_dir(path).output().await?;
         git(path, &["config", "user.email", "test@example.com"]).await?;

@@ -47,6 +47,11 @@ pub fn parse_git_diff(diff: &str) -> anyhow::Result<Vec<FileDiff>> {
             continue;
         }
 
+        if line.starts_with("Binary files ") || line == "GIT binary patch" {
+            file.is_binary = true;
+            continue;
+        }
+
         if let Some(rest) = line.strip_prefix("--- ") {
             let path = normalize_diff_path(rest);
             if path.is_empty() {
@@ -167,7 +172,7 @@ fn normalize_diff_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::parse_git_diff;
-    use crate::domain::diff::FileStatus;
+    use crate::domain::diff::{DiffLineKind, FileStatus};
 
     #[test]
     fn parses_added_and_modified_files() {
@@ -190,5 +195,96 @@ new file mode 100644
         assert_eq!(files[0].status, FileStatus::Modified);
         assert_eq!(files[1].status, FileStatus::Added);
         assert_eq!(files[1].new_path, "new.txt");
+    }
+
+    #[test]
+    fn parses_rename_and_copy_entries() {
+        let diff = r#"diff --git a/old_name.txt b/new_name.txt
+similarity index 100%
+rename from old_name.txt
+rename to new_name.txt
+diff --git a/source.txt b/copied.txt
+similarity index 100%
+copy from source.txt
+copy to copied.txt
+"#;
+
+        let files = parse_git_diff(diff).unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].old_path, "old_name.txt");
+        assert_eq!(files[0].new_path, "new_name.txt");
+        assert_eq!(files[0].hunks.len(), 0);
+        assert_eq!(files[1].old_path, "source.txt");
+        assert_eq!(files[1].new_path, "copied.txt");
+        assert_eq!(files[1].hunks.len(), 0);
+    }
+
+    #[test]
+    fn parses_binary_file_diffs() {
+        let diff = r#"diff --git a/assets/logo.png b/assets/logo.png
+index 1111111..2222222 100644
+Binary files a/assets/logo.png and b/assets/logo.png differ
+"#;
+
+        let files = parse_git_diff(diff).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].display_path(), "assets/logo.png");
+        assert!(files[0].is_binary);
+        assert!(files[0].hunks.is_empty());
+    }
+
+    #[test]
+    fn parses_no_newline_markers() {
+        let diff = r#"diff --git a/readme.txt b/readme.txt
+--- a/readme.txt
++++ b/readme.txt
+@@ -1 +1 @@
+-old
+\ No newline at end of file
++new
+\ No newline at end of file
+"#;
+
+        let files = parse_git_diff(diff).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].hunks.len(), 1);
+        assert_eq!(files[0].hunks[0].lines.len(), 2);
+        assert_eq!(files[0].hunks[0].lines[0].kind, DiffLineKind::Remove);
+        assert_eq!(files[0].hunks[0].lines[0].content, "old");
+        assert_eq!(files[0].hunks[0].lines[1].kind, DiffLineKind::Add);
+        assert_eq!(files[0].hunks[0].lines[1].content, "new");
+    }
+
+    #[test]
+    fn parses_rewrite_same_path() {
+        let diff = r#"diff --git a/config.txt b/config.txt
+--- a/config.txt
++++ b/config.txt
+@@ -1,2 +1,2 @@
+-old-a
+-old-b
++new-a
++new-b
+"#;
+
+        let files = parse_git_diff(diff).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].display_path(), "config.txt");
+        assert_eq!(files[0].status, FileStatus::Modified);
+        assert_eq!(files[0].hunks.len(), 1);
+
+        let removed = files[0].hunks[0]
+            .lines
+            .iter()
+            .filter(|line| line.kind == DiffLineKind::Remove)
+            .count();
+        let added = files[0].hunks[0]
+            .lines
+            .iter()
+            .filter(|line| line.kind == DiffLineKind::Add)
+            .count();
+
+        assert_eq!(removed, 2);
+        assert_eq!(added, 2);
     }
 }
