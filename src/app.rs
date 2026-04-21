@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -23,6 +24,10 @@ use tokio::sync::mpsc;
 
 use crate::domain::diff::{DiffLineKind, FileDiff, ReviewStatus};
 use crate::services::git::GitService;
+use crate::services::opencode::{
+    OpencodeService, OpencodeSession, WhyAnswer, WhyTarget, why_target_for_file,
+    why_target_for_hunk, why_target_for_line,
+};
 use crate::ui::styles;
 
 pub async fn run() -> Result<()> {
@@ -54,6 +59,9 @@ pub async fn run() -> Result<()> {
 struct App {
     repo_path: PathBuf,
     git: GitService,
+    opencode: Option<OpencodeService>,
+    session_state: SessionUiState,
+    why_this: WhyThisUiState,
     status: String,
     screen: Screen,
     review: ReviewUiState,
@@ -69,6 +77,8 @@ struct App {
 enum Overlay {
     None,
     CommitPrompt,
+    SessionPicker,
+    WhyThis,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,16 +111,55 @@ enum Message {
         success_status: String,
         result: Result<(), String>,
     },
+    WhyThisFinished {
+        cache_key: String,
+        label: String,
+        result: Result<WhyAnswer, String>,
+    },
+}
+
+#[derive(Default)]
+struct SessionUiState {
+    sessions: Vec<OpencodeSession>,
+    selected: Option<usize>,
+    cursor: usize,
+}
+
+#[derive(Default)]
+struct WhyThisUiState {
+    cache: HashMap<String, WhyAnswer>,
+    panel: WhyThisPanel,
+}
+
+#[derive(Default)]
+enum WhyThisPanel {
+    #[default]
+    Empty,
+    Loading {
+        label: String,
+    },
+    Ready {
+        label: String,
+        answer: WhyAnswer,
+    },
+    Failed {
+        label: String,
+        error: String,
+    },
 }
 
 impl App {
     async fn new() -> Result<Self> {
         let repo_path = std::env::current_dir()?;
         let git = GitService::new(&repo_path);
+        let opencode = OpencodeService::new(&repo_path).ok();
         let (tx, rx) = mpsc::unbounded_channel();
         let mut app = Self {
             repo_path,
             git,
+            opencode,
+            session_state: SessionUiState::default(),
+            why_this: WhyThisUiState::default(),
             status: "Run your coding agent elsewhere, then open better-review to review changes."
                 .to_string(),
             screen: Screen::Home,
@@ -130,7 +179,23 @@ impl App {
         let (_, files) = self.git.collect_diff().await?;
         self.review.files = files;
         self.had_staged_changes_on_open = self.git.has_staged_changes().await?;
+        self.load_sessions()?;
 
+        Ok(())
+    }
+
+    fn load_sessions(&mut self) -> Result<()> {
+        let Some(opencode) = &self.opencode else {
+            return Ok(());
+        };
+
+        let sessions = opencode.list_repo_sessions()?;
+        let selected = if sessions.is_empty() { None } else { Some(0) };
+        self.session_state = SessionUiState {
+            sessions,
+            selected,
+            cursor: 0,
+        };
         Ok(())
     }
 
@@ -155,6 +220,12 @@ impl App {
         self.status = "Write a commit message for the accepted changes.".to_string();
 
         new_commit_message_input()
+    }
+
+    fn active_session(&self) -> Option<&OpencodeSession> {
+        self.session_state
+            .selected
+            .and_then(|index| self.session_state.sessions.get(index))
     }
 }
 
@@ -275,6 +346,26 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                         }
                     }
                 }
+                Message::WhyThisFinished {
+                    cache_key,
+                    label,
+                    result,
+                } => {
+                    app.review_busy = false;
+                    match result {
+                        Ok(answer) => {
+                            app.status = format!("Loaded why-this for {label}.");
+                            app.why_this.cache.insert(cache_key, answer.clone());
+                            app.why_this.panel = WhyThisPanel::Ready { label, answer };
+                            app.overlay = Overlay::WhyThis;
+                        }
+                        Err(error) => {
+                            app.status = format!("Could not load why-this: {error}");
+                            app.why_this.panel = WhyThisPanel::Failed { label, error };
+                            app.overlay = Overlay::WhyThis;
+                        }
+                    }
+                }
             }
         }
 
@@ -300,6 +391,8 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                         commit_message.input(to_textarea_input(key));
                     }
                 },
+                Overlay::SessionPicker => handle_session_picker_key(&mut app, key),
+                Overlay::WhyThis => handle_why_this_overlay_key(&mut app, key),
                 Overlay::None => {
                     if key.code == KeyCode::Enter && app.screen == Screen::Home {
                         if app.review.files.is_empty() {
@@ -476,8 +569,102 @@ async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 }
             }
         }
+        KeyCode::Char('s') => {
+            if app.session_state.sessions.is_empty() {
+                app.status = "No opencode sessions were found for this repository.".to_string();
+            } else {
+                if let Some(selected) = app.session_state.selected {
+                    app.session_state.cursor = selected;
+                }
+                app.overlay = Overlay::SessionPicker;
+                app.status = "Choose which opencode session Why This? should use.".to_string();
+            }
+        }
+        KeyCode::Char('w') => {
+            request_why_this(app).await?;
+        }
         _ => {}
     }
+
+    Ok(())
+}
+
+fn handle_session_picker_key(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => {
+            app.overlay = Overlay::None;
+            app.status = "Session picker closed.".to_string();
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.session_state.cursor = app.session_state.cursor.saturating_sub(1);
+        }
+        KeyCode::Down | KeyCode::Char('j')
+            if app.session_state.cursor + 1 < app.session_state.sessions.len() =>
+        {
+            app.session_state.cursor += 1;
+        }
+        KeyCode::Enter => {
+            app.session_state.selected = Some(app.session_state.cursor);
+            app.overlay = Overlay::None;
+            if let Some(session) = app.active_session() {
+                app.status = format!("Why This? will use opencode session {}.", session.title);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_why_this_overlay_key(app: &mut App, key: KeyEvent) {
+    if key.code == KeyCode::Esc {
+        app.overlay = Overlay::None;
+        app.status = "Why This? pane closed.".to_string();
+    }
+}
+
+async fn request_why_this(app: &mut App) -> Result<()> {
+    let Some(opencode) = app.opencode.clone() else {
+        app.status =
+            "Why This? is unavailable because opencode could not be initialized.".to_string();
+        return Ok(());
+    };
+    let Some(session) = app.active_session().cloned() else {
+        app.status = "No opencode session is attributed to this repository. Press s to choose one."
+            .to_string();
+        return Ok(());
+    };
+
+    let Some((label, target)) = current_why_target(&app.review) else {
+        app.status = "Nothing is selected for Why This?.".to_string();
+        return Ok(());
+    };
+
+    let cache_key = target.cache_key(&session.id);
+    if let Some(answer) = app.why_this.cache.get(&cache_key).cloned() {
+        app.overlay = Overlay::WhyThis;
+        app.why_this.panel = WhyThisPanel::Ready { label, answer };
+        app.status = "Showing cached why-this explanation.".to_string();
+        return Ok(());
+    }
+
+    let tx = app.tx.clone();
+    app.review_busy = true;
+    app.overlay = Overlay::WhyThis;
+    app.why_this.panel = WhyThisPanel::Loading {
+        label: label.clone(),
+    };
+    app.status = format!("Asking opencode why this exists for {label}...");
+
+    tokio::spawn(async move {
+        let result = opencode
+            .ask_why(&session.id, &target)
+            .await
+            .map_err(|err| err.to_string());
+        let _ = tx.send(Message::WhyThisFinished {
+            cache_key,
+            label,
+            result,
+        });
+    });
 
     Ok(())
 }
@@ -498,6 +685,8 @@ fn draw(frame: &mut ratatui::Frame, app: &App, commit_message: &TextArea<'_>) {
 
     match app.overlay {
         Overlay::CommitPrompt => draw_commit_prompt(frame, layout[1], app, commit_message),
+        Overlay::SessionPicker => draw_session_picker(frame, layout[1], app),
+        Overlay::WhyThis => draw_why_this(frame, layout[1], app),
         Overlay::None => {}
     }
 }
@@ -665,7 +854,11 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 
     let sections = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(28), Constraint::Min(30)])
+        .constraints([
+            Constraint::Length(28),
+            Constraint::Min(30),
+            Constraint::Length(34),
+        ])
         .split(content);
 
     let counts = app.review_counts();
@@ -810,6 +1003,137 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     let diff_scroll = diff_scroll_offset(app, sections[1], &diff_lines);
     let diff = Paragraph::new(diff_lines).scroll((diff_scroll, 0));
     frame.render_widget(diff, sections[1]);
+
+    let why_block = Block::default()
+        .title("Why This?")
+        .borders(Borders::LEFT)
+        .border_style(Style::default().fg(styles::BORDER_MUTED));
+    let why_lines = why_panel_lines(app);
+    frame.render_widget(
+        Paragraph::new(why_lines)
+            .block(why_block)
+            .wrap(Wrap { trim: true }),
+        sections[2],
+    );
+}
+
+fn draw_session_picker(frame: &mut ratatui::Frame, area: Rect, app: &App) {
+    let modal = centered_rect(58, 42, area);
+    frame.render_widget(Clear, modal);
+    let items = app
+        .session_state
+        .sessions
+        .iter()
+        .enumerate()
+        .map(|(index, session)| {
+            let style = if index == app.session_state.cursor {
+                Style::default()
+                    .fg(styles::TEXT_PRIMARY)
+                    .bg(styles::ACCENT_DIM)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(styles::TEXT_MUTED)
+            };
+            let marker = if app.session_state.selected == Some(index) {
+                "[✓]"
+            } else {
+                "[ ]"
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!(" {marker} "), style),
+                Span::styled(session.title.clone(), style),
+            ]))
+        })
+        .collect::<Vec<_>>();
+    let mut state = ListState::default().with_selected(Some(app.session_state.cursor));
+    frame.render_stateful_widget(
+        List::new(items).block(
+            Block::default()
+                .title("Choose opencode session")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(styles::BORDER_MUTED)),
+        ),
+        modal,
+        &mut state,
+    );
+}
+
+fn draw_why_this(frame: &mut ratatui::Frame, area: Rect, app: &App) {
+    let modal = centered_rect(70, 52, area);
+    frame.render_widget(Clear, modal);
+    frame.render_widget(
+        Paragraph::new(why_panel_lines(app))
+            .block(
+                Block::default()
+                    .title("Why This?")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(styles::BORDER_MUTED)),
+            )
+            .wrap(Wrap { trim: true }),
+        modal,
+    );
+}
+
+fn why_panel_lines(app: &App) -> Vec<Line<'static>> {
+    let session_line = app
+        .active_session()
+        .map(|session| format!("session: {} ({})", session.title, session.id))
+        .unwrap_or_else(|| "session: none selected".to_string());
+
+    let mut lines = vec![Line::from(Span::styled(
+        session_line,
+        styles::soft_accent(),
+    ))];
+    match &app.why_this.panel {
+        WhyThisPanel::Empty => {
+            lines.push(Line::from(Span::raw("")));
+            lines.push(Line::from(Span::styled(
+                "Press w to ask opencode why the selected file, hunk, or line exists.",
+                styles::muted(),
+            )));
+            lines.push(Line::from(Span::styled(
+                "Press s to change the attributed opencode session.",
+                styles::muted(),
+            )));
+        }
+        WhyThisPanel::Loading { label } => {
+            lines.push(Line::from(Span::raw("")));
+            lines.push(Line::from(Span::styled(
+                format!("Loading explanation for {label}..."),
+                styles::title(),
+            )));
+            lines.push(Line::from(Span::styled(
+                "Using a fork of the selected session so the live coding thread stays clean.",
+                styles::muted(),
+            )));
+        }
+        WhyThisPanel::Ready { label, answer } => {
+            lines.push(Line::from(Span::raw("")));
+            lines.push(Line::from(Span::styled(label.clone(), styles::title())));
+            lines.push(Line::from(Span::styled(
+                format!("forked session: {}", answer.fork_session_id),
+                styles::subtle(),
+            )));
+            lines.push(Line::from(Span::raw("")));
+            for paragraph in answer.content.split("\n\n") {
+                lines.push(Line::from(Span::raw(paragraph.to_string())));
+                lines.push(Line::from(Span::raw("")));
+            }
+        }
+        WhyThisPanel::Failed { label, error } => {
+            lines.push(Line::from(Span::raw("")));
+            lines.push(Line::from(Span::styled(
+                format!("Failed to explain {label}"),
+                Style::default()
+                    .fg(styles::DANGER)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(Span::raw("")));
+            lines.push(Line::from(Span::raw(error.clone())));
+        }
+    }
+
+    lines
 }
 
 fn diff_scroll_offset(app: &App, area: Rect, diff_lines: &[Line<'_>]) -> u16 {
@@ -953,6 +1277,34 @@ fn move_review_cursor_by_line(app: &mut App, delta: isize) {
     }
 }
 
+fn current_why_target(review: &ReviewUiState) -> Option<(String, WhyTarget)> {
+    let file = review.files.get(review.cursor_file)?;
+    if review.focus == ReviewFocus::Files || file.hunks.is_empty() {
+        let target = why_target_for_file(file);
+        let label = target.label();
+        return Some((label, target));
+    }
+
+    let hunk = file.hunks.get(review.cursor_hunk)?;
+    let hunk_start = hunk_line_start(file, review.cursor_hunk);
+    if review.cursor_line <= hunk_start {
+        let target = why_target_for_hunk(file, hunk);
+        let label = target.label();
+        return Some((label, target));
+    }
+
+    let line_index = review.cursor_line.saturating_sub(hunk_start + 1);
+    if let Some(line) = hunk.lines.get(line_index) {
+        let target = why_target_for_line(file, hunk, line);
+        let label = target.label();
+        return Some((label, target));
+    }
+
+    let target = why_target_for_hunk(file, hunk);
+    let label = target.label();
+    Some((label, target))
+}
+
 fn review_marker(
     status: ReviewStatus,
     file_status: crate::domain::diff::FileStatus,
@@ -1080,6 +1432,26 @@ mod tests {
     use super::*;
     use crate::domain::diff::{DiffLine, DiffLineKind, FileDiff, FileStatus, Hunk, ReviewStatus};
 
+    fn sample_app(review: ReviewUiState) -> App {
+        let (tx, rx) = mpsc::unbounded_channel();
+        App {
+            repo_path: PathBuf::from("."),
+            git: GitService::new("."),
+            opencode: None,
+            session_state: SessionUiState::default(),
+            why_this: WhyThisUiState::default(),
+            status: String::new(),
+            screen: Screen::Review,
+            review,
+            overlay: Overlay::None,
+            had_staged_changes_on_open: false,
+            review_busy: false,
+            logo_animation: AnimatedTextState::with_interval(120),
+            tx,
+            rx,
+        }
+    }
+
     fn sample_file() -> FileDiff {
         FileDiff {
             new_path: "src/lib.rs".to_string(),
@@ -1129,29 +1501,18 @@ mod tests {
 
     #[test]
     fn review_counts_aggregate_file_and_hunk_statuses() {
-        let mut app = App {
-            repo_path: PathBuf::from("."),
-            git: GitService::new("."),
-            status: String::new(),
-            screen: Screen::Home,
-            review: ReviewUiState {
-                files: vec![
-                    sample_file(),
-                    FileDiff {
-                        new_path: "README.md".to_string(),
-                        review_status: ReviewStatus::Rejected,
-                        ..FileDiff::default()
-                    },
-                ],
-                ..ReviewUiState::default()
-            },
-            overlay: Overlay::None,
-            had_staged_changes_on_open: false,
-            review_busy: false,
-            logo_animation: AnimatedTextState::with_interval(120),
-            tx: mpsc::unbounded_channel().0,
-            rx: mpsc::unbounded_channel().1,
-        };
+        let mut app = sample_app(ReviewUiState {
+            files: vec![
+                sample_file(),
+                FileDiff {
+                    new_path: "README.md".to_string(),
+                    review_status: ReviewStatus::Rejected,
+                    ..FileDiff::default()
+                },
+            ],
+            ..ReviewUiState::default()
+        });
+        app.screen = Screen::Home;
 
         let counts = app.review_counts();
         assert_eq!(counts.unreviewed, 1);
@@ -1214,26 +1575,13 @@ mod tests {
 
     #[test]
     fn move_review_cursor_by_line_updates_current_hunk() {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let mut app = App {
-            repo_path: PathBuf::from("."),
-            git: GitService::new("."),
-            status: String::new(),
-            screen: Screen::Review,
-            review: ReviewUiState {
-                files: vec![sample_file()],
-                cursor_file: 0,
-                cursor_hunk: 0,
-                cursor_line: 1,
-                focus: ReviewFocus::Hunks,
-            },
-            overlay: Overlay::None,
-            had_staged_changes_on_open: false,
-            review_busy: false,
-            logo_animation: AnimatedTextState::with_interval(120),
-            tx,
-            rx,
-        };
+        let mut app = sample_app(ReviewUiState {
+            files: vec![sample_file()],
+            cursor_file: 0,
+            cursor_hunk: 0,
+            cursor_line: 1,
+            focus: ReviewFocus::Hunks,
+        });
 
         move_review_cursor_by_line(&mut app, 4);
         assert_eq!(app.review.cursor_line, 5);
@@ -1288,26 +1636,13 @@ mod tests {
 
     #[test]
     fn diff_scroll_offset_respects_focus_and_window() {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let app = App {
-            repo_path: PathBuf::from("."),
-            git: GitService::new("."),
-            status: String::new(),
-            screen: Screen::Review,
-            review: ReviewUiState {
-                files: vec![sample_file()],
-                cursor_file: 0,
-                cursor_hunk: 1,
-                cursor_line: 6,
-                focus: ReviewFocus::Hunks,
-            },
-            overlay: Overlay::None,
-            had_staged_changes_on_open: false,
-            review_busy: false,
-            logo_animation: AnimatedTextState::with_interval(120),
-            tx,
-            rx,
-        };
+        let app = sample_app(ReviewUiState {
+            files: vec![sample_file()],
+            cursor_file: 0,
+            cursor_hunk: 1,
+            cursor_line: 6,
+            focus: ReviewFocus::Hunks,
+        });
 
         let lines = vec![
             Line::raw("0"),
@@ -1337,5 +1672,60 @@ mod tests {
 
         let mapped = to_textarea_input(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT));
         assert!(mapped.shift);
+    }
+
+    #[test]
+    fn current_why_target_uses_file_scope_when_focus_is_files() {
+        let review = ReviewUiState {
+            files: vec![sample_file()],
+            cursor_file: 0,
+            cursor_hunk: 0,
+            cursor_line: 0,
+            focus: ReviewFocus::Files,
+        };
+
+        let (label, target) = current_why_target(&review).expect("target");
+        assert_eq!(label, "file src/lib.rs");
+        match target {
+            WhyTarget::File { path, .. } => assert_eq!(path, "src/lib.rs"),
+            _ => panic!("expected file target"),
+        }
+    }
+
+    #[test]
+    fn current_why_target_uses_hunk_scope_for_hunk_header() {
+        let review = ReviewUiState {
+            files: vec![sample_file()],
+            cursor_file: 0,
+            cursor_hunk: 1,
+            cursor_line: hunk_line_start(&sample_file(), 1),
+            focus: ReviewFocus::Hunks,
+        };
+
+        let (label, target) = current_why_target(&review).expect("target");
+        assert!(label.starts_with("hunk src/lib.rs"));
+        match target {
+            WhyTarget::Hunk { header, .. } => assert_eq!(header, "@@ -10,1 +10,1 @@"),
+            _ => panic!("expected hunk target"),
+        }
+    }
+
+    #[test]
+    fn current_why_target_uses_line_scope_inside_hunk_body() {
+        let file = sample_file();
+        let review = ReviewUiState {
+            files: vec![file.clone()],
+            cursor_file: 0,
+            cursor_hunk: 0,
+            cursor_line: hunk_line_start(&file, 0) + 2,
+            focus: ReviewFocus::Hunks,
+        };
+
+        let (label, target) = current_why_target(&review).expect("target");
+        assert!(label.starts_with("line src/lib.rs"));
+        match target {
+            WhyTarget::Line { line_content, .. } => assert_eq!(line_content, "new"),
+            _ => panic!("expected line target"),
+        }
     }
 }

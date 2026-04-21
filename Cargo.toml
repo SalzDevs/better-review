@@ -11,6 +11,8 @@ ratatui = "0.30"
 ratatui-interact = "0.5"
 regex = "1.12"
 ratatui-core = "0.1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde_json = "1.0"
 thiserror = "2.0"
 tokio = { version = "1.48", features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
 ratatui-textarea = "0.9"

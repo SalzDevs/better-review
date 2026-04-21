@@ -56,6 +56,7 @@ Coding agents accelerate implementation, but they also make it easy to skip inte
 - **Non-destructive reject semantics**: reject controls commit eligibility rather than nuking your worktree
 - **Pure review workflow**: run your coding agent however you like, then use `better-review` to inspect and gate the result
 - **Fullscreen terminal UX**: home screen, review panes, and commit modal
+- **Why This? with session context**: ask opencode why a selected file, hunk, or line exists using a fork of the attributed session
 - **Terminal safety guardrails**: alternate screen and scrollback purge during app lifecycle
 
 ## Installation
@@ -161,6 +162,8 @@ cargo run
 | `y` | Accept file or hunk |
 | `x` | Reject file or hunk |
 | `u` | Move file back to unreviewed |
+| `w` | Ask `Why This?` for the selected file, hunk, or line |
+| `s` | Change the attributed opencode session for `Why This?` |
 | `c` | Open commit prompt |
 | `Ctrl+C` | Quit |
 
@@ -235,6 +238,13 @@ Current limitations to keep in mind:
 - submodules are not a first-class review surface yet
 - sparse checkouts and unusual index/worktree setups are not explicitly supported yet
 - binary, rename, and copy diffs are recognized, but the UI treatment is still basic
+
+### How does `Why This?` work?
+
+- `better-review` attributes the most recently updated local `opencode` session for the current repository by default
+- Press `s` if you want to switch to a different local session for this repo
+- Press `w` to ask why the current file, hunk, or line exists
+- The explanation is requested through `opencode run --session <id> --fork`, so it uses the same session context without polluting the active coding thread
 
 ### Why not just `git add -p`?
 
