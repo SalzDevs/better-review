@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -26,7 +26,8 @@ use crate::domain::diff::{DiffLineKind, FileDiff, ReviewStatus};
 use crate::services::git::GitService;
 use crate::services::opencode::{
     OpencodeService, OpencodeSession, WhyAnswer, WhyTarget, why_target_for_file,
-    why_target_for_hunk, why_target_for_line,
+    why_target_for_hunk, why_target_for_line, why_target_for_selected_hunks,
+    why_target_for_selected_lines,
 };
 use crate::ui::styles;
 
@@ -129,6 +130,19 @@ struct SessionUiState {
 struct WhyThisUiState {
     cache: HashMap<String, WhyAnswer>,
     panel: WhyThisPanel,
+    selections: HashMap<String, WhySelection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WhySelection {
+    Hunks(BTreeSet<usize>),
+    Lines(BTreeSet<SelectedLine>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct SelectedLine {
+    hunk_index: usize,
+    line_index: usize,
 }
 
 #[derive(Default)]
@@ -583,6 +597,9 @@ async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Char('w') => {
             request_why_this(app).await?;
         }
+        KeyCode::Char(' ') => {
+            toggle_why_selection(app);
+        }
         _ => {}
     }
 
@@ -633,7 +650,7 @@ async fn request_why_this(app: &mut App) -> Result<()> {
         return Ok(());
     };
 
-    let Some((label, target)) = current_why_target(&app.review) else {
+    let Some((label, target)) = current_why_target(&app.review, &app.why_this) else {
         app.status = "Nothing is selected for Why This?.".to_string();
         return Ok(());
     };
@@ -920,11 +937,16 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     let mut line_hunks = vec![None];
 
     if let Some(file) = app.review.files.get(app.review.cursor_file) {
+        let selection = app.why_this.selections.get(file.display_path());
         for (index, hunk) in file.hunks.iter().enumerate() {
             let is_current_hunk =
                 app.review.focus == ReviewFocus::Hunks && app.review.cursor_hunk == index;
             let is_current_line = app.review.focus == ReviewFocus::Hunks
                 && app.review.cursor_line == diff_lines.len();
+            let is_selected_hunk = matches!(
+                selection,
+                Some(WhySelection::Hunks(hunks)) if hunks.contains(&index)
+            );
             let mut style = Style::default()
                 .fg(styles::TEXT_PRIMARY)
                 .bg(styles::SURFACE_RAISED);
@@ -957,12 +979,23 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                     ),
                     style,
                 ),
+                Span::styled(
+                    if is_selected_hunk { " [why]" } else { "" },
+                    styles::soft_accent(),
+                ),
                 status,
             ]));
             line_hunks.push(Some(index));
-            for line in &hunk.lines {
+            for (line_index, line) in hunk.lines.iter().enumerate() {
                 let is_current_line = app.review.focus == ReviewFocus::Hunks
                     && app.review.cursor_line == diff_lines.len();
+                let is_selected_line = matches!(
+                    selection,
+                    Some(WhySelection::Lines(lines)) if lines.contains(&SelectedLine {
+                        hunk_index: index,
+                        line_index,
+                    })
+                );
                 let prefix = match line.kind {
                     DiffLineKind::Add => "+",
                     DiffLineKind::Remove => "-",
@@ -977,6 +1010,8 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                     style
                         .bg(styles::SURFACE_RAISED)
                         .add_modifier(Modifier::UNDERLINED)
+                } else if is_selected_line {
+                    style.bg(styles::ACCENT_DIM)
                 } else {
                     style
                 };
@@ -990,6 +1025,10 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                     .unwrap_or_else(|| "    ".to_string());
                 diff_lines.push(Line::from(vec![
                     Span::styled(format!("{old} {new} "), styles::subtle()),
+                    Span::styled(
+                        if is_selected_line { "*" } else { " " },
+                        styles::soft_accent(),
+                    ),
                     Span::styled(prefix, style),
                     Span::styled(line.content.clone(), style),
                 ]));
@@ -1005,13 +1044,15 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     frame.render_widget(diff, sections[1]);
 
     let why_block = Block::default()
-        .title("Why This?")
+        .title(Line::from(Span::styled("Why This?", styles::title())))
         .borders(Borders::LEFT)
-        .border_style(Style::default().fg(styles::BORDER_MUTED));
+        .border_style(Style::default().fg(styles::BORDER_MUTED))
+        .style(Style::default().bg(styles::SURFACE_RAISED));
     let why_lines = why_panel_lines(app);
     frame.render_widget(
         Paragraph::new(why_lines)
             .block(why_block)
+            .style(Style::default().bg(styles::SURFACE_RAISED))
             .wrap(Wrap { trim: true }),
         sections[2],
     );
@@ -1020,6 +1061,18 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 fn draw_session_picker(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     let modal = centered_rect(58, 42, area);
     frame.render_widget(Clear, modal);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(styles::SURFACE_RAISED)),
+        modal,
+    );
+    let inner = modal.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(2)])
+        .split(inner);
     let items = app
         .session_state
         .sessions
@@ -1049,12 +1102,27 @@ fn draw_session_picker(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     frame.render_stateful_widget(
         List::new(items).block(
             Block::default()
-                .title("Choose opencode session")
+                .title(Line::from(Span::styled(
+                    "Choose opencode session",
+                    styles::title(),
+                )))
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(styles::BORDER_MUTED)),
+                .border_style(Style::default().fg(styles::ACCENT_BRIGHT))
+                .style(Style::default().bg(styles::SURFACE_RAISED)),
         ),
-        modal,
+        sections[0],
         &mut state,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Enter", styles::keybind()),
+            Span::styled(" select", styles::muted()),
+            Span::raw("  "),
+            Span::styled("Esc", styles::keybind()),
+            Span::styled(" close", styles::muted()),
+        ]))
+        .style(Style::default().bg(styles::SURFACE_RAISED)),
+        sections[1],
     );
 }
 
@@ -1065,10 +1133,12 @@ fn draw_why_this(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         Paragraph::new(why_panel_lines(app))
             .block(
                 Block::default()
-                    .title("Why This?")
+                    .title(Line::from(Span::styled("Why This?", styles::title())))
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(styles::BORDER_MUTED)),
+                    .border_style(Style::default().fg(styles::ACCENT_BRIGHT))
+                    .style(Style::default().bg(styles::SURFACE_RAISED)),
             )
+            .style(Style::default().bg(styles::SURFACE_RAISED))
             .wrap(Wrap { trim: true }),
         modal,
     );
@@ -1084,6 +1154,9 @@ fn why_panel_lines(app: &App) -> Vec<Line<'static>> {
         session_line,
         styles::soft_accent(),
     ))];
+    if let Some(selection_summary) = current_selection_summary(app) {
+        lines.push(Line::from(Span::styled(selection_summary, styles::muted())));
+    }
     match &app.why_this.panel {
         WhyThisPanel::Empty => {
             lines.push(Line::from(Span::raw("")));
@@ -1093,6 +1166,10 @@ fn why_panel_lines(app: &App) -> Vec<Line<'static>> {
             )));
             lines.push(Line::from(Span::styled(
                 "Press s to change the attributed opencode session.",
+                styles::muted(),
+            )));
+            lines.push(Line::from(Span::styled(
+                "Press Space on hunk headers or diff lines to build a grouped Why This? selection for this file.",
                 styles::muted(),
             )));
         }
@@ -1277,8 +1354,168 @@ fn move_review_cursor_by_line(app: &mut App, delta: isize) {
     }
 }
 
-fn current_why_target(review: &ReviewUiState) -> Option<(String, WhyTarget)> {
+fn toggle_why_selection(app: &mut App) {
+    if app.review.focus != ReviewFocus::Hunks {
+        app.status = "Open a file hunk or line first, then press Space to build a grouped Why This? selection.".to_string();
+        return;
+    }
+
+    let Some(file) = app.review.files.get(app.review.cursor_file) else {
+        app.status = "No file is selected for Why This?.".to_string();
+        return;
+    };
+    if file.hunks.is_empty() {
+        app.status = "This file has no textual hunks to group for Why This?.".to_string();
+        return;
+    }
+
+    let path = file.display_path().to_string();
+    let hunk_index = app
+        .review
+        .cursor_hunk
+        .min(file.hunks.len().saturating_sub(1));
+    let hunk = &file.hunks[hunk_index];
+    let hunk_start = hunk_line_start(file, hunk_index);
+
+    if app.review.cursor_line <= hunk_start {
+        let selected_count = toggle_hunk_selection(&mut app.why_this.selections, &path, hunk_index);
+        app.status = if selected_count == 0 {
+            format!("Cleared Why This? hunk selection for {path}.")
+        } else {
+            format!("Selected {selected_count} hunk(s) in {path} for grouped Why This?.")
+        };
+        return;
+    }
+
+    let line_index = app.review.cursor_line.saturating_sub(hunk_start + 1);
+    if hunk.lines.get(line_index).is_none() {
+        let selected_count = toggle_hunk_selection(&mut app.why_this.selections, &path, hunk_index);
+        app.status = if selected_count == 0 {
+            format!("Cleared Why This? hunk selection for {path}.")
+        } else {
+            format!("Selected {selected_count} hunk(s) in {path} for grouped Why This?.")
+        };
+        return;
+    }
+
+    let selected_count = toggle_line_selection(
+        &mut app.why_this.selections,
+        &path,
+        SelectedLine {
+            hunk_index,
+            line_index,
+        },
+    );
+    app.status = if selected_count == 0 {
+        format!("Cleared Why This? line selection for {path}.")
+    } else {
+        format!("Selected {selected_count} line(s) in {path} for grouped Why This?.")
+    };
+}
+
+fn toggle_hunk_selection(
+    selections: &mut HashMap<String, WhySelection>,
+    path: &str,
+    hunk_index: usize,
+) -> usize {
+    let entry = selections
+        .entry(path.to_string())
+        .or_insert_with(|| WhySelection::Hunks(BTreeSet::new()));
+    if !matches!(entry, WhySelection::Hunks(_)) {
+        *entry = WhySelection::Hunks(BTreeSet::new());
+    }
+
+    let WhySelection::Hunks(hunks) = entry else {
+        unreachable!();
+    };
+    if !hunks.insert(hunk_index) {
+        hunks.remove(&hunk_index);
+    }
+
+    let count = hunks.len();
+    if count == 0 {
+        selections.remove(path);
+    }
+    count
+}
+
+fn toggle_line_selection(
+    selections: &mut HashMap<String, WhySelection>,
+    path: &str,
+    selected_line: SelectedLine,
+) -> usize {
+    let entry = selections
+        .entry(path.to_string())
+        .or_insert_with(|| WhySelection::Lines(BTreeSet::new()));
+    if !matches!(entry, WhySelection::Lines(_)) {
+        *entry = WhySelection::Lines(BTreeSet::new());
+    }
+
+    let WhySelection::Lines(lines) = entry else {
+        unreachable!();
+    };
+    if !lines.insert(selected_line) {
+        lines.remove(&selected_line);
+    }
+
+    let count = lines.len();
+    if count == 0 {
+        selections.remove(path);
+    }
+    count
+}
+
+fn current_selection_summary(app: &App) -> Option<String> {
+    let file = app.review.files.get(app.review.cursor_file)?;
+    let selection = app.why_this.selections.get(file.display_path())?;
+    Some(match selection {
+        WhySelection::Hunks(hunks) if !hunks.is_empty() => {
+            format!("selection: {} hunk(s) in this file", hunks.len())
+        }
+        WhySelection::Lines(lines) if !lines.is_empty() => {
+            format!("selection: {} line(s) in this file", lines.len())
+        }
+        _ => return None,
+    })
+}
+
+fn current_why_target(
+    review: &ReviewUiState,
+    why_this: &WhyThisUiState,
+) -> Option<(String, WhyTarget)> {
     let file = review.files.get(review.cursor_file)?;
+    if let Some(selection) = why_this.selections.get(file.display_path()) {
+        match selection {
+            WhySelection::Hunks(hunk_indexes) if !hunk_indexes.is_empty() => {
+                let hunks = hunk_indexes
+                    .iter()
+                    .filter_map(|index| file.hunks.get(*index))
+                    .collect::<Vec<_>>();
+                if !hunks.is_empty() {
+                    let target = why_target_for_selected_hunks(file, hunks);
+                    let label = target.label();
+                    return Some((label, target));
+                }
+            }
+            WhySelection::Lines(selected_lines) if !selected_lines.is_empty() => {
+                let lines = selected_lines
+                    .iter()
+                    .filter_map(|selected_line| {
+                        let hunk = file.hunks.get(selected_line.hunk_index)?;
+                        let line = hunk.lines.get(selected_line.line_index)?;
+                        Some((hunk, line))
+                    })
+                    .collect::<Vec<_>>();
+                if !lines.is_empty() {
+                    let target = why_target_for_selected_lines(file, lines);
+                    let label = target.label();
+                    return Some((label, target));
+                }
+            }
+            _ => {}
+        }
+    }
+
     if review.focus == ReviewFocus::Files || file.hunks.is_empty() {
         let target = why_target_for_file(file);
         let label = target.label();
@@ -1684,7 +1921,8 @@ mod tests {
             focus: ReviewFocus::Files,
         };
 
-        let (label, target) = current_why_target(&review).expect("target");
+        let (label, target) =
+            current_why_target(&review, &WhyThisUiState::default()).expect("target");
         assert_eq!(label, "file src/lib.rs");
         match target {
             WhyTarget::File { path, .. } => assert_eq!(path, "src/lib.rs"),
@@ -1694,15 +1932,17 @@ mod tests {
 
     #[test]
     fn current_why_target_uses_hunk_scope_for_hunk_header() {
+        let file = sample_file();
         let review = ReviewUiState {
-            files: vec![sample_file()],
+            files: vec![file.clone()],
             cursor_file: 0,
             cursor_hunk: 1,
-            cursor_line: hunk_line_start(&sample_file(), 1),
+            cursor_line: hunk_line_start(&file, 1),
             focus: ReviewFocus::Hunks,
         };
 
-        let (label, target) = current_why_target(&review).expect("target");
+        let (label, target) =
+            current_why_target(&review, &WhyThisUiState::default()).expect("target");
         assert!(label.starts_with("hunk src/lib.rs"));
         match target {
             WhyTarget::Hunk { header, .. } => assert_eq!(header, "@@ -10,1 +10,1 @@"),
@@ -1721,11 +1961,104 @@ mod tests {
             focus: ReviewFocus::Hunks,
         };
 
-        let (label, target) = current_why_target(&review).expect("target");
+        let (label, target) =
+            current_why_target(&review, &WhyThisUiState::default()).expect("target");
         assert!(label.starts_with("line src/lib.rs"));
         match target {
             WhyTarget::Line { line_content, .. } => assert_eq!(line_content, "new"),
             _ => panic!("expected line target"),
         }
+    }
+
+    #[test]
+    fn current_why_target_prefers_grouped_hunk_selection_for_current_file() {
+        let file = sample_file();
+        let review = ReviewUiState {
+            files: vec![file],
+            cursor_file: 0,
+            cursor_hunk: 0,
+            cursor_line: 0,
+            focus: ReviewFocus::Hunks,
+        };
+        let mut why_this = WhyThisUiState::default();
+        why_this.selections.insert(
+            "src/lib.rs".to_string(),
+            WhySelection::Hunks(BTreeSet::from([0, 1])),
+        );
+
+        let (label, target) = current_why_target(&review, &why_this).expect("target");
+        assert_eq!(label, "2 selected hunk(s) in src/lib.rs");
+        match target {
+            WhyTarget::SelectedHunks { hunks, .. } => assert_eq!(hunks.len(), 2),
+            _ => panic!("expected selected hunks target"),
+        }
+    }
+
+    #[test]
+    fn current_why_target_prefers_grouped_line_selection_for_current_file() {
+        let file = sample_file();
+        let review = ReviewUiState {
+            files: vec![file],
+            cursor_file: 0,
+            cursor_hunk: 0,
+            cursor_line: 0,
+            focus: ReviewFocus::Hunks,
+        };
+        let mut why_this = WhyThisUiState::default();
+        why_this.selections.insert(
+            "src/lib.rs".to_string(),
+            WhySelection::Lines(BTreeSet::from([
+                SelectedLine {
+                    hunk_index: 0,
+                    line_index: 0,
+                },
+                SelectedLine {
+                    hunk_index: 0,
+                    line_index: 1,
+                },
+            ])),
+        );
+
+        let (label, target) = current_why_target(&review, &why_this).expect("target");
+        assert_eq!(label, "2 selected line(s) in src/lib.rs");
+        match target {
+            WhyTarget::SelectedLines { lines, .. } => assert_eq!(lines.len(), 2),
+            _ => panic!("expected selected lines target"),
+        }
+    }
+
+    #[test]
+    fn toggle_selection_replaces_mismatched_selection_kind() {
+        let mut selections = HashMap::from([(
+            "src/lib.rs".to_string(),
+            WhySelection::Lines(BTreeSet::from([SelectedLine {
+                hunk_index: 0,
+                line_index: 1,
+            }])),
+        )]);
+
+        let count = toggle_hunk_selection(&mut selections, "src/lib.rs", 1);
+        assert_eq!(count, 1);
+        assert!(matches!(
+            selections.get("src/lib.rs"),
+            Some(WhySelection::Hunks(hunks)) if hunks.contains(&1)
+        ));
+
+        let count = toggle_line_selection(
+            &mut selections,
+            "src/lib.rs",
+            SelectedLine {
+                hunk_index: 0,
+                line_index: 0,
+            },
+        );
+        assert_eq!(count, 1);
+        assert!(matches!(
+            selections.get("src/lib.rs"),
+            Some(WhySelection::Lines(lines)) if lines.contains(&SelectedLine {
+                hunk_index: 0,
+                line_index: 0,
+            })
+        ));
     }
 }

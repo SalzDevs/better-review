@@ -5,11 +5,13 @@ use anyhow::{Context, Result, anyhow, bail};
 use rusqlite::Connection;
 use serde_json::Value;
 use tokio::process::Command;
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 
 use crate::domain::diff::{DiffLine, DiffLineKind, FileDiff, Hunk};
 
 const RUN_TIMEOUT: Duration = Duration::from_secs(120);
+const ANSWER_LOOKUP_ATTEMPTS: usize = 12;
+const ANSWER_LOOKUP_DELAY: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpencodeSession {
@@ -23,6 +25,22 @@ pub struct OpencodeSession {
 pub struct WhyAnswer {
     pub content: String,
     pub fork_session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectedHunkTarget {
+    pub header: String,
+    pub diff: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectedLineTarget {
+    pub header: String,
+    pub line_kind: DiffLineKind,
+    pub old_line: Option<u32>,
+    pub new_line: Option<u32>,
+    pub line_content: String,
+    pub hunk_diff: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +64,14 @@ pub enum WhyTarget {
         line_content: String,
         hunk_diff: String,
     },
+    SelectedHunks {
+        path: String,
+        hunks: Vec<SelectedHunkTarget>,
+    },
+    SelectedLines {
+        path: String,
+        lines: Vec<SelectedLineTarget>,
+    },
 }
 
 impl WhyTarget {
@@ -67,6 +93,12 @@ impl WhyTarget {
                 };
                 format!("line {path} ({locator})")
             }
+            Self::SelectedHunks { path, hunks } => {
+                format!("{} selected hunk(s) in {path}", hunks.len())
+            }
+            Self::SelectedLines { path, lines } => {
+                format!("{} selected line(s) in {path}", lines.len())
+            }
         }
     }
 
@@ -84,6 +116,32 @@ impl WhyTarget {
                 "{session_id}:line:{path}:{}:{}:{line_content}",
                 old_line.map(|value| value.to_string()).unwrap_or_default(),
                 new_line.map(|value| value.to_string()).unwrap_or_default(),
+            ),
+            Self::SelectedHunks { path, hunks } => format!(
+                "{session_id}:selected-hunks:{path}:{}",
+                hunks
+                    .iter()
+                    .map(|hunk| hunk.header.replace('|', "/"))
+                    .collect::<Vec<_>>()
+                    .join("|")
+            ),
+            Self::SelectedLines { path, lines } => format!(
+                "{session_id}:selected-lines:{path}:{}",
+                lines
+                    .iter()
+                    .map(|line| format!(
+                        "{}:{}:{}:{}",
+                        line.header.replace('|', "/"),
+                        line.old_line
+                            .map(|value| value.to_string())
+                            .unwrap_or_default(),
+                        line.new_line
+                            .map(|value| value.to_string())
+                            .unwrap_or_default(),
+                        line.line_content.replace('|', "/")
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("|")
             ),
         }
     }
@@ -120,6 +178,44 @@ impl WhyTarget {
                     .map(|value| value.to_string())
                     .unwrap_or_else(|| "none".to_string()),
                 line_content,
+            ),
+            Self::SelectedHunks { path, hunks } => format!(
+                "{instruction}\n\nScope: selected hunks\nPath: {path}\nSelection count: {}\n\nExplain why these selected hunks exist together in this file. Describe the shared intent first, then mention any notable differences or risk.\n\n{}",
+                hunks.len(),
+                hunks
+                    .iter()
+                    .enumerate()
+                    .map(|(index, hunk)| format!(
+                        "Selected hunk {}\nHeader: {}\n{}",
+                        index + 1,
+                        hunk.header,
+                        hunk.diff
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
+            ),
+            Self::SelectedLines { path, lines } => format!(
+                "{instruction}\n\nScope: selected lines\nPath: {path}\nSelection count: {}\n\nExplain why these selected lines exist. Describe any shared intent first, then briefly cover each selected line with its role and risk.\n\n{}",
+                lines.len(),
+                lines
+                    .iter()
+                    .enumerate()
+                    .map(|(index, line)| format!(
+                        "Selected line {}\nHunk: {}\nLine kind: {}\nOld line: {}\nNew line: {}\nSelected line: {}\n\nFull hunk diff:\n{}",
+                        index + 1,
+                        line.header,
+                        line_kind_label(line.line_kind),
+                        line.old_line
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "none".to_string()),
+                        line.new_line
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "none".to_string()),
+                        line.line_content,
+                        line.hunk_diff,
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
             ),
         }
     }
@@ -169,8 +265,7 @@ impl OpencodeService {
 
         let fork_session_id = extract_session_id_from_run_output(&output)
             .context("opencode did not report a fork session id")?;
-        let exported = self.export_session(&fork_session_id).await?;
-        let content = extract_answer_from_export(&exported)?;
+        let content = self.wait_for_answer(&fork_session_id).await?;
 
         Ok(WhyAnswer {
             content,
@@ -210,26 +305,51 @@ impl OpencodeService {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 
-    async fn export_session(&self, session_id: &str) -> Result<String> {
-        let output = Command::new("opencode")
-            .args(["export", session_id])
-            .output()
-            .await
-            .context("failed to export opencode session")?;
+    async fn wait_for_answer(&self, session_id: &str) -> Result<String> {
+        let mut last_error = None;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            bail!(
-                "failed to export opencode fork session{}",
-                if stderr.is_empty() {
-                    String::new()
-                } else {
-                    format!(": {stderr}")
-                }
-            );
+        for attempt in 0..ANSWER_LOOKUP_ATTEMPTS {
+            match self.latest_assistant_text(session_id) {
+                Ok(answer) => return Ok(answer),
+                Err(err) => last_error = Some(err),
+            }
+
+            if attempt + 1 < ANSWER_LOOKUP_ATTEMPTS {
+                sleep(ANSWER_LOOKUP_DELAY).await;
+            }
         }
 
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        Err(last_error.unwrap_or_else(|| anyhow!("opencode did not persist a forked answer")))
+    }
+
+    fn latest_assistant_text(&self, session_id: &str) -> Result<String> {
+        let connection = Connection::open(&self.db_path)
+            .with_context(|| format!("failed to open {}", self.db_path.display()))?;
+        let mut statement = connection.prepare(
+            "select id, data from message
+             where session_id = ?1
+             order by time_created desc",
+        )?;
+        let rows = statement.query_map([session_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+
+        for row in rows {
+            let (message_id, message_data) = row?;
+            let message: Value = serde_json::from_str(&message_data)
+                .context("failed to parse opencode message JSON")?;
+            if message_role(&message) != Some("assistant") {
+                continue;
+            }
+
+            let text_parts = message_text_parts(&connection, session_id, &message_id)?;
+            let text_refs = text_parts.iter().map(String::as_str).collect::<Vec<_>>();
+            if let Some(answer) = sanitize_candidate_answer(&text_refs) {
+                return Ok(answer);
+            }
+        }
+
+        bail!("opencode did not return a text explanation")
     }
 }
 
@@ -258,6 +378,36 @@ pub fn why_target_for_line(file: &FileDiff, hunk: &Hunk, line: &DiffLine) -> Why
         new_line: line.new_line,
         line_content: line.content.clone(),
         hunk_diff: diff_text_for_hunk(file, hunk),
+    }
+}
+
+pub fn why_target_for_selected_hunks(file: &FileDiff, hunks: Vec<&Hunk>) -> WhyTarget {
+    WhyTarget::SelectedHunks {
+        path: file.display_path().to_string(),
+        hunks: hunks
+            .into_iter()
+            .map(|hunk| SelectedHunkTarget {
+                header: hunk.header.clone(),
+                diff: diff_text_for_hunk(file, hunk),
+            })
+            .collect(),
+    }
+}
+
+pub fn why_target_for_selected_lines(file: &FileDiff, lines: Vec<(&Hunk, &DiffLine)>) -> WhyTarget {
+    WhyTarget::SelectedLines {
+        path: file.display_path().to_string(),
+        lines: lines
+            .into_iter()
+            .map(|(hunk, line)| SelectedLineTarget {
+                header: hunk.header.clone(),
+                line_kind: line.kind,
+                old_line: line.old_line,
+                new_line: line.new_line,
+                line_content: line.content.clone(),
+                hunk_diff: diff_text_for_hunk(file, hunk),
+            })
+            .collect(),
     }
 }
 
@@ -353,65 +503,72 @@ fn extract_session_id_from_run_output(output: &str) -> Option<String> {
     })
 }
 
-fn extract_answer_from_export(export: &str) -> Result<String> {
-    let json_start = export
-        .find('{')
-        .context("exported session did not contain JSON data")?;
-    let payload = &export[json_start..];
-    let value: Value =
-        serde_json::from_str(payload).context("failed to parse exported session JSON")?;
-    let messages = value
-        .get("messages")
-        .and_then(Value::as_array)
-        .context("exported session did not include messages")?;
-
-    for message in messages.iter().rev() {
-        let role = message
-            .get("info")
-            .and_then(|info| info.get("role"))
-            .and_then(Value::as_str);
-        if role != Some("assistant") {
-            continue;
-        }
-
-        let parts = message
-            .get("parts")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten();
-        let text_parts = parts
-            .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
-            .filter_map(|part| part.get("text").and_then(Value::as_str))
-            .map(str::trim)
-            .filter(|text| !text.is_empty())
-            .collect::<Vec<_>>();
-
-        if let Some(answer) = sanitize_exported_answer(&text_parts) {
-            return Ok(answer);
-        }
-    }
-
-    bail!("opencode did not return a text explanation")
-}
-
-fn sanitize_exported_answer(parts: &[&str]) -> Option<String> {
-    let joined = parts.join("\n\n");
-    let mut cleaned = joined.trim().to_string();
-
-    if let Some(reminder_index) = cleaned.find("<system-reminder>") {
-        cleaned.truncate(reminder_index);
-        cleaned = cleaned.trim().to_string();
-    }
-
-    if looks_like_prompt_echo(&cleaned) {
-        return None;
-    }
+fn sanitize_candidate_answer(parts: &[&str]) -> Option<String> {
+    let cleaned = parts
+        .iter()
+        .filter_map(|part| sanitize_candidate_part(part))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let cleaned = cleaned.trim().to_string();
 
     if cleaned.is_empty() {
         None
     } else {
         Some(cleaned)
     }
+}
+
+fn sanitize_candidate_part(part: &str) -> Option<String> {
+    let mut cleaned = part.trim().to_string();
+    if let Some(reminder_index) = cleaned.find("<system-reminder>") {
+        cleaned.truncate(reminder_index);
+        cleaned = cleaned.trim().to_string();
+    }
+
+    if cleaned.is_empty() || looks_like_prompt_echo(&cleaned) {
+        None
+    } else {
+        Some(cleaned)
+    }
+}
+
+fn message_role(message: &Value) -> Option<&str> {
+    message
+        .get("role")
+        .and_then(Value::as_str)
+        .or_else(|| message.get("info")?.get("role")?.as_str())
+}
+
+fn message_text_parts(
+    connection: &Connection,
+    session_id: &str,
+    message_id: &str,
+) -> Result<Vec<String>> {
+    let mut statement = connection.prepare(
+        "select data from part
+         where session_id = ?1 and message_id = ?2
+         order by time_created asc",
+    )?;
+    let rows = statement.query_map(rusqlite::params![session_id, message_id], |row| {
+        row.get::<_, String>(0)
+    })?;
+
+    let mut text_parts = Vec::new();
+    for row in rows {
+        let data = row?;
+        let part: Value =
+            serde_json::from_str(&data).context("failed to parse opencode part JSON")?;
+        if part.get("type").and_then(Value::as_str) == Some("text")
+            && let Some(text) = part.get("text").and_then(Value::as_str)
+        {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                text_parts.push(trimmed.to_string());
+            }
+        }
+    }
+
+    Ok(text_parts)
 }
 
 fn looks_like_prompt_echo(text: &str) -> bool {
@@ -425,6 +582,7 @@ fn looks_like_prompt_echo(text: &str) -> bool {
 mod tests {
     use super::*;
     use crate::domain::diff::{DiffLine, DiffLineKind, FileDiff, FileStatus, Hunk};
+    use serde_json::json;
     use tempfile::tempdir;
 
     fn sample_file() -> FileDiff {
@@ -482,39 +640,20 @@ mod tests {
     }
 
     #[test]
-    fn extracts_text_answer_from_export() {
-        let export = r#"Exporting session: ses_x{"messages":[{"info":{"role":"assistant"},"parts":[{"type":"text","text":"Intent\nChange\nRisk"}]}]}"#;
-        let answer = extract_answer_from_export(export).unwrap();
-        assert_eq!(answer, "Intent\nChange\nRisk");
-    }
-
-    #[test]
-    fn extracts_last_non_empty_assistant_answer_from_export() {
-        let export = r#"Exporting session: ses_x{"messages":[
-            {"info":{"role":"assistant"},"parts":[{"type":"text","text":"  "}]},
-            {"info":{"role":"user"},"parts":[{"type":"text","text":"ignore me"}]},
-            {"info":{"role":"assistant"},"parts":[
-                {"type":"text","text":"Intent: update parser"},
-                {"type":"text","text":"\n\nRisk: low"}
-            ]}
-        ]}"#;
-        let answer = extract_answer_from_export(export).unwrap();
+    fn sanitize_candidate_answer_keeps_non_empty_text_parts() {
+        let answer = sanitize_candidate_answer(&["Intent: update parser", "Risk: low"]).unwrap();
         assert_eq!(answer, "Intent: update parser\n\nRisk: low");
     }
 
     #[test]
-    fn ignores_prompt_echo_and_system_reminder_in_exported_answer() {
-        let export = r#"Exporting session: ses_x{"messages":[
-            {"info":{"role":"assistant"},"parts":[
-                {"type":"text","text":"You are explaining code that was produced in this exact opencode session context.\n\nScope: hunk\nPath: Cargo.lock"},
-                {"type":"text","text":"<system-reminder>\nYour operational mode has changed from plan to build.\n</system-reminder>"}
-            ]},
-            {"info":{"role":"assistant"},"parts":[
-                {"type":"text","text":"Intent: add SQLite-backed session discovery\n\nChange: add rusqlite and a Why This panel\n\nRisk: the export parser must ignore prompt echoes."}
-            ]}
-        ]}"#;
+    fn sanitize_candidate_answer_ignores_prompt_echo_and_system_reminders() {
+        let answer = sanitize_candidate_answer(&[
+            "You are explaining code that was produced in this exact opencode session context.\n\nScope: hunk\nPath: Cargo.lock",
+            "<system-reminder>\nYour operational mode has changed from plan to build.\n</system-reminder>",
+            "Intent: add SQLite-backed session discovery\n\nChange: add rusqlite and a Why This panel\n\nRisk: the export parser must ignore prompt echoes.",
+        ])
+        .unwrap();
 
-        let answer = extract_answer_from_export(export).unwrap();
         assert_eq!(
             answer,
             "Intent: add SQLite-backed session discovery\n\nChange: add rusqlite and a Why This panel\n\nRisk: the export parser must ignore prompt echoes."
@@ -522,13 +661,109 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_exported_answer_rejects_prompt_echo_only_payloads() {
+    fn sanitize_candidate_answer_rejects_prompt_echo_only_payloads() {
         let prompt_echo = [
             "You are explaining code that was produced in this exact opencode session context.",
             "Scope: line",
         ];
 
-        assert_eq!(sanitize_exported_answer(&prompt_echo), None);
+        assert_eq!(sanitize_candidate_answer(&prompt_echo), None);
+    }
+
+    #[test]
+    fn latest_assistant_text_reads_parts_from_db() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("opencode.db");
+        let repo_path = temp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+
+        let connection = Connection::open(&db_path).unwrap();
+        create_message_tables(&connection);
+        insert_message(
+            &connection,
+            "ses_1",
+            "msg_user",
+            1,
+            json!({ "role": "user" }),
+        );
+        insert_part(
+            &connection,
+            "ses_1",
+            "msg_user",
+            1,
+            json!({ "type": "text", "text": "why?" }),
+        );
+        insert_message(
+            &connection,
+            "ses_1",
+            "msg_assistant",
+            2,
+            json!({ "role": "assistant" }),
+        );
+        insert_part(
+            &connection,
+            "ses_1",
+            "msg_assistant",
+            2,
+            json!({ "type": "text", "text": "Intent: explain change" }),
+        );
+        insert_part(
+            &connection,
+            "ses_1",
+            "msg_assistant",
+            3,
+            json!({ "type": "text", "text": "Risk: low" }),
+        );
+
+        let service = OpencodeService { repo_path, db_path };
+        let answer = service.latest_assistant_text("ses_1").unwrap();
+        assert_eq!(answer, "Intent: explain change\n\nRisk: low");
+    }
+
+    #[test]
+    fn latest_assistant_text_skips_prompt_echo_only_messages() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("opencode.db");
+        let repo_path = temp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+
+        let connection = Connection::open(&db_path).unwrap();
+        create_message_tables(&connection);
+        insert_message(
+            &connection,
+            "ses_1",
+            "msg_answer",
+            1,
+            json!({ "role": "assistant" }),
+        );
+        insert_part(
+            &connection,
+            "ses_1",
+            "msg_answer",
+            1,
+            json!({ "type": "text", "text": "Intent: useful answer" }),
+        );
+        insert_message(
+            &connection,
+            "ses_1",
+            "msg_echo",
+            2,
+            json!({ "role": "assistant" }),
+        );
+        insert_part(
+            &connection,
+            "ses_1",
+            "msg_echo",
+            2,
+            json!({
+                "type": "text",
+                "text": "You are explaining code that was produced in this exact opencode session context.\n\nScope: file"
+            }),
+        );
+
+        let service = OpencodeService { repo_path, db_path };
+        let answer = service.latest_assistant_text("ses_1").unwrap();
+        assert_eq!(answer, "Intent: useful answer");
     }
 
     #[test]
@@ -681,5 +916,57 @@ mod tests {
         assert_eq!(sessions[0].id, "ses_new");
         assert_eq!(sessions[0].title, "Newest");
         assert_eq!(sessions[1].id, "ses_old");
+    }
+
+    fn create_message_tables(connection: &Connection) {
+        connection
+            .execute_batch(
+                "
+                create table message (
+                    id text primary key,
+                    session_id text not null,
+                    data text not null,
+                    time_created integer not null
+                );
+                create table part (
+                    id integer primary key,
+                    session_id text not null,
+                    message_id text not null,
+                    data text not null,
+                    time_created integer not null
+                );
+                ",
+            )
+            .unwrap();
+    }
+
+    fn insert_message(
+        connection: &Connection,
+        session_id: &str,
+        message_id: &str,
+        time_created: i64,
+        data: Value,
+    ) {
+        connection
+            .execute(
+                "insert into message (id, session_id, data, time_created) values (?1, ?2, ?3, ?4)",
+                rusqlite::params![message_id, session_id, data.to_string(), time_created],
+            )
+            .unwrap();
+    }
+
+    fn insert_part(
+        connection: &Connection,
+        session_id: &str,
+        message_id: &str,
+        time_created: i64,
+        data: Value,
+    ) {
+        connection
+            .execute(
+                "insert into part (session_id, message_id, data, time_created) values (?1, ?2, ?3, ?4)",
+                rusqlite::params![session_id, message_id, data.to_string(), time_created],
+            )
+            .unwrap();
     }
 }

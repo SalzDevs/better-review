@@ -162,7 +162,8 @@ cargo run
 | `y` | Accept file or hunk |
 | `x` | Reject file or hunk |
 | `u` | Move file back to unreviewed |
-| `w` | Ask `Why This?` for the selected file, hunk, or line |
+| `Space` | Toggle grouped `Why This?` selection on the current hunk header or diff line (within the current file) |
+| `w` | Ask `Why This?` for the selected file/hunk/line, or for grouped selected hunks/lines in the current file |
 | `s` | Change the attributed opencode session for `Why This?` |
 | `c` | Open commit prompt |
 | `Ctrl+C` | Quit |
@@ -243,7 +244,8 @@ Current limitations to keep in mind:
 
 - `better-review` attributes the most recently updated local `opencode` session for the current repository by default
 - Press `s` if you want to switch to a different local session for this repo
-- Press `w` to ask why the current file, hunk, or line exists
+- In hunk view, press `Space` on hunk headers or diff lines to build a grouped `Why This?` selection for the current file
+- Press `w` to ask why the current file, hunk, or line exists, or to explain the grouped selection in the current file
 - The explanation is requested through `opencode run --session <id> --fork`, so it uses the same session context without polluting the active coding thread
 
 ### Why not just `git add -p`?
