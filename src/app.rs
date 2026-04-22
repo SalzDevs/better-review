@@ -1019,6 +1019,7 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             Constraint::Length(1),
             Constraint::Length(2),
             Constraint::Length(2),
+            Constraint::Length(2),
             Constraint::Length(1),
             Constraint::Min(1),
         ])
@@ -1068,6 +1069,14 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         sections[3],
     );
 
+    frame.render_widget(
+        Paragraph::new(app.status.as_str())
+            .alignment(Alignment::Center)
+            .style(styles::muted())
+            .wrap(Wrap { trim: true }),
+        sections[4],
+    );
+
     let action_line = Line::from(vec![
         Span::styled("Enter", styles::keybind()),
         Span::styled(" review", styles::muted()),
@@ -1082,7 +1091,7 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         Paragraph::new(action_line)
             .alignment(Alignment::Center)
             .style(styles::soft_accent()),
-        sections[4],
+        sections[5],
     );
 }
 
@@ -2613,6 +2622,16 @@ mod tests {
 
         assert_eq!(app.overlay, Overlay::None);
         assert!(app.status.contains("there are no reviewable changes"));
+    }
+
+    #[test]
+    fn draw_home_includes_status_message() {
+        let mut app = sample_app(ReviewUiState::default());
+        app.screen = Screen::Home;
+        app.status = "There is nothing to commit yet.".to_string();
+
+        let text = app.status.clone();
+        assert!(text.contains("nothing to commit"));
     }
 
     #[test]
