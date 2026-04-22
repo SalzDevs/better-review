@@ -1077,20 +1077,19 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         sections[4],
     );
 
-    let action_line = Line::from(vec![
-        Span::styled("Enter", styles::keybind()),
-        Span::styled(" review", styles::muted()),
-        Span::raw("      "),
-        Span::styled("c", styles::keybind()),
-        Span::styled(" commit", styles::muted()),
-        Span::raw("      "),
-        Span::styled("Ctrl+C", styles::keybind()),
-        Span::styled(" quit", styles::muted()),
-    ]);
     frame.render_widget(
-        Paragraph::new(action_line)
-            .alignment(Alignment::Center)
-            .style(styles::soft_accent()),
+        Paragraph::new(Line::from(vec![
+            Span::styled("Enter", styles::keybind()),
+            Span::styled(" review", styles::muted()),
+            Span::raw("      "),
+            Span::styled("c", styles::keybind()),
+            Span::styled(" commit", styles::muted()),
+            Span::raw("      "),
+            Span::styled("Ctrl+C", styles::keybind()),
+            Span::styled(" quit", styles::muted()),
+        ]))
+        .alignment(Alignment::Center)
+        .style(styles::soft_accent()),
         sections[5],
     );
 }
