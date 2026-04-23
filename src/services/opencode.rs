@@ -51,22 +51,6 @@ struct WhyAnswerPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SelectedHunkTarget {
-    pub header: String,
-    pub diff: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SelectedLineTarget {
-    pub header: String,
-    pub line_kind: DiffLineKind,
-    pub old_line: Option<u32>,
-    pub new_line: Option<u32>,
-    pub line_content: String,
-    pub hunk_diff: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WhyTarget {
     File {
         path: String,
@@ -86,14 +70,6 @@ pub enum WhyTarget {
         new_line: Option<u32>,
         line_content: String,
         hunk_diff: String,
-    },
-    SelectedHunks {
-        path: String,
-        hunks: Vec<SelectedHunkTarget>,
-    },
-    SelectedLines {
-        path: String,
-        lines: Vec<SelectedLineTarget>,
     },
 }
 
@@ -116,12 +92,6 @@ impl WhyTarget {
                 };
                 format!("line {path} ({locator})")
             }
-            Self::SelectedHunks { path, hunks } => {
-                format!("{} selected hunk(s) in {path}", hunks.len())
-            }
-            Self::SelectedLines { path, lines } => {
-                format!("{} selected line(s) in {path}", lines.len())
-            }
         }
     }
 
@@ -139,32 +109,6 @@ impl WhyTarget {
                 "{session_id}:line:{path}:{}:{}:{line_content}",
                 old_line.map(|value| value.to_string()).unwrap_or_default(),
                 new_line.map(|value| value.to_string()).unwrap_or_default(),
-            ),
-            Self::SelectedHunks { path, hunks } => format!(
-                "{session_id}:selected-hunks:{path}:{}",
-                hunks
-                    .iter()
-                    .map(|hunk| hunk.header.replace('|', "/"))
-                    .collect::<Vec<_>>()
-                    .join("|")
-            ),
-            Self::SelectedLines { path, lines } => format!(
-                "{session_id}:selected-lines:{path}:{}",
-                lines
-                    .iter()
-                    .map(|line| format!(
-                        "{}:{}:{}:{}",
-                        line.header.replace('|', "/"),
-                        line.old_line
-                            .map(|value| value.to_string())
-                            .unwrap_or_default(),
-                        line.new_line
-                            .map(|value| value.to_string())
-                            .unwrap_or_default(),
-                        line.line_content.replace('|', "/")
-                    ))
-                    .collect::<Vec<_>>()
-                    .join("|")
             ),
         }
     }
@@ -202,44 +146,6 @@ impl WhyTarget {
                     .map(|value| value.to_string())
                     .unwrap_or_else(|| "none".to_string()),
                 line_content,
-            ),
-            Self::SelectedHunks { path, hunks } => format!(
-                "{instruction}\n\nScope: selected hunks\nPath: {path}\nSelection count: {}\n\nExplain why these selected hunks exist together in this file. Describe the shared intent first, then mention any notable differences or risk.\n\n{}",
-                hunks.len(),
-                hunks
-                    .iter()
-                    .enumerate()
-                    .map(|(index, hunk)| format!(
-                        "Selected hunk {}\nHeader: {}\n{}",
-                        index + 1,
-                        hunk.header,
-                        hunk.diff
-                    ))
-                    .collect::<Vec<_>>()
-                    .join("\n\n")
-            ),
-            Self::SelectedLines { path, lines } => format!(
-                "{instruction}\n\nScope: selected lines\nPath: {path}\nSelection count: {}\n\nExplain why these selected lines exist. Describe any shared intent first, then briefly cover each selected line with its role and risk.\n\n{}",
-                lines.len(),
-                lines
-                    .iter()
-                    .enumerate()
-                    .map(|(index, line)| format!(
-                        "Selected line {}\nHunk: {}\nLine kind: {}\nOld line: {}\nNew line: {}\nSelected line: {}\n\nFull hunk diff:\n{}",
-                        index + 1,
-                        line.header,
-                        line_kind_label(line.line_kind),
-                        line.old_line
-                            .map(|value| value.to_string())
-                            .unwrap_or_else(|| "none".to_string()),
-                        line.new_line
-                            .map(|value| value.to_string())
-                            .unwrap_or_else(|| "none".to_string()),
-                        line.line_content,
-                        line.hunk_diff,
-                    ))
-                    .collect::<Vec<_>>()
-                    .join("\n\n")
             ),
         }
     }
@@ -295,7 +201,20 @@ impl OpencodeService {
         .await
         .map_err(|_| anyhow!("opencode timed out while generating a why-this explanation"))??;
 
-        let fork_session_id = extract_session_id_from_run_output(&output)
+        if let Some(payload) = parse_answer_from_run_output(&output)? {
+            let fork_session_id = extract_fork_session_id_from_run_output(&output, session_id)
+                .unwrap_or_else(|| session_id.to_string());
+            return Ok(WhyAnswer {
+                summary: payload.summary,
+                purpose: payload.purpose,
+                change: payload.change,
+                risk_level: payload.risk_level,
+                risk_reason: payload.risk_reason,
+                fork_session_id,
+            });
+        }
+
+        let fork_session_id = extract_fork_session_id_from_run_output(&output, session_id)
             .context("opencode did not report a fork session id")?;
         let payload = self.wait_for_answer(&fork_session_id).await?;
 
@@ -375,6 +294,7 @@ impl OpencodeService {
         let mut command = Command::new("opencode");
         command
             .arg("run")
+            .arg("--pure")
             .arg("--session")
             .arg(session_id)
             .arg("--fork")
@@ -490,36 +410,6 @@ pub fn why_target_for_line(file: &FileDiff, hunk: &Hunk, line: &DiffLine) -> Why
     }
 }
 
-pub fn why_target_for_selected_hunks(file: &FileDiff, hunks: Vec<&Hunk>) -> WhyTarget {
-    WhyTarget::SelectedHunks {
-        path: file.display_path().to_string(),
-        hunks: hunks
-            .into_iter()
-            .map(|hunk| SelectedHunkTarget {
-                header: hunk.header.clone(),
-                diff: diff_text_for_hunk(file, hunk),
-            })
-            .collect(),
-    }
-}
-
-pub fn why_target_for_selected_lines(file: &FileDiff, lines: Vec<(&Hunk, &DiffLine)>) -> WhyTarget {
-    WhyTarget::SelectedLines {
-        path: file.display_path().to_string(),
-        lines: lines
-            .into_iter()
-            .map(|(hunk, line)| SelectedLineTarget {
-                header: hunk.header.clone(),
-                line_kind: line.kind,
-                old_line: line.old_line,
-                new_line: line.new_line,
-                line_content: line.content.clone(),
-                hunk_diff: diff_text_for_hunk(file, hunk),
-            })
-            .collect(),
-    }
-}
-
 fn diff_text_for_file(file: &FileDiff) -> String {
     let old_path = if file.old_path.is_empty() {
         "/dev/null"
@@ -597,19 +487,81 @@ fn line_kind_label(kind: DiffLineKind) -> &'static str {
 }
 
 fn extract_session_id_from_run_output(output: &str) -> Option<String> {
-    output.lines().find_map(|line| {
-        let value = serde_json::from_str::<Value>(line).ok()?;
-        value
-            .get("sessionID")
+    session_ids_from_run_output(output).into_iter().next()
+}
+
+fn extract_fork_session_id_from_run_output(
+    output: &str,
+    parent_session_id: &str,
+) -> Option<String> {
+    let ids = session_ids_from_run_output(output);
+    ids.iter()
+        .find(|id| id.as_str() != parent_session_id)
+        .cloned()
+        .or_else(|| ids.into_iter().next())
+}
+
+fn session_ids_from_run_output(output: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+
+    for line in output.lines() {
+        let value = match serde_json::from_str::<Value>(line) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let event_type = value.get("type").and_then(Value::as_str);
+        let nested = value
+            .get("part")
+            .and_then(|part| part.get("sessionID"))
+            .and_then(Value::as_str);
+        let top_level = value.get("sessionID").and_then(Value::as_str);
+
+        let allow_ids = matches!(event_type, Some("step_start" | "text" | "step_finish"))
+            || (event_type.is_none() && nested.is_some());
+        if !allow_ids {
+            continue;
+        }
+
+        let candidates = if matches!(event_type, Some("step_start" | "text" | "step_finish")) {
+            vec![nested, top_level]
+        } else {
+            vec![nested]
+        };
+
+        for session_id in candidates.into_iter().flatten() {
+            if !ids.iter().any(|existing| existing == session_id) {
+                ids.push(session_id.to_string());
+            }
+        }
+    }
+
+    ids
+}
+
+fn parse_answer_from_run_output(output: &str) -> Result<Option<WhyAnswerPayload>> {
+    let mut parts = Vec::new();
+
+    for line in output.lines() {
+        let value = match serde_json::from_str::<Value>(line) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let event_type = value.get("type").and_then(Value::as_str);
+        if event_type != Some("text") {
+            continue;
+        }
+
+        if let Some(text) = value
+            .get("part")
+            .and_then(|part| part.get("text"))
             .and_then(Value::as_str)
-            .or_else(|| {
-                value
-                    .get("part")
-                    .and_then(|part| part.get("sessionID"))
-                    .and_then(Value::as_str)
-            })
-            .map(ToString::to_string)
-    })
+        {
+            parts.push(text.to_string());
+        }
+    }
+
+    let refs = parts.iter().map(String::as_str).collect::<Vec<_>>();
+    parse_candidate_answer(&refs)
 }
 
 fn parse_candidate_answer(parts: &[&str]) -> Result<Option<WhyAnswerPayload>> {
@@ -624,8 +576,9 @@ fn parse_candidate_answer(parts: &[&str]) -> Result<Option<WhyAnswerPayload>> {
         return Ok(None);
     }
 
-    let json_payload =
-        extract_first_json_object(&cleaned).context("failed to locate why-this JSON payload")?;
+    let Some(json_payload) = extract_first_json_object(&cleaned) else {
+        return Ok(None);
+    };
     let payload: WhyAnswerPayload =
         serde_json::from_str(&json_payload).context("failed to parse why-this JSON payload")?;
     Ok(Some(normalize_payload(payload)))
@@ -748,7 +701,13 @@ fn looks_like_prompt_echo(text: &str) -> bool {
     let normalized = trimmed.trim_start_matches(['"', '\'']);
     normalized.starts_with(
         "You are explaining code that was produced in this exact opencode session context.",
-    ) || normalized.starts_with("Scope: ")
+    ) || normalized.starts_with("Return ONLY valid JSON")
+        || normalized.starts_with("Scope: ")
+        || normalized.starts_with("Path: ")
+        || normalized.starts_with("Status: ")
+        || normalized.starts_with("Diff:")
+        || normalized.starts_with("Thinking:")
+        || normalized.contains("Schema exactly: {\"version\":1")
 }
 
 fn strip_system_reminder(text: &str) -> String {
@@ -821,6 +780,19 @@ mod tests {
     }
 
     #[test]
+    fn extract_fork_session_id_prefers_non_parent_id() {
+        let output = concat!(
+            "{\"type\":\"step_start\",\"sessionID\":\"ses_parent\",\"part\":{\"sessionID\":\"ses_fork\"}}\n",
+            "{\"type\":\"text\",\"sessionID\":\"ses_parent\",\"part\":{\"sessionID\":\"ses_fork\",\"text\":\"...\"}}\n"
+        );
+
+        assert_eq!(
+            extract_fork_session_id_from_run_output(output, "ses_parent"),
+            Some("ses_fork".to_string())
+        );
+    }
+
+    #[test]
     fn parse_candidate_answer_parses_valid_json_payload() {
         let answer = parse_candidate_answer(&[
             r#"{"version":1,"summary":"update parser","purpose":"make explain output deterministic","change":"tighten output schema","risk_level":"low","risk_reason":"small formatting drift"}"#,
@@ -877,6 +849,16 @@ mod tests {
     }
 
     #[test]
+    fn parse_candidate_answer_rejects_schema_only_prompt_echo() {
+        let prompt_echo = [
+            "\"Return ONLY valid JSON with no markdown or extra text. Schema exactly: {\\\"version\\\":1,\\\"summary\\\":string,\\\"purpose\\\":string,\\\"change\\\":string,\\\"risk_level\\\":\\\"low\\\"|\\\"medium\\\"|\\\"high\\\",\\\"risk_reason\\\":string}. Explain this tiny diff intent: +update docs, -remove old keybindings.\"",
+            "<system-reminder>\nYour operational mode has changed from plan to build.\n</system-reminder>",
+        ];
+
+        assert_eq!(parse_candidate_answer(&prompt_echo).unwrap(), None);
+    }
+
+    #[test]
     fn parse_candidate_answer_normalizes_multiline_fields() {
         let payload = [
             "You are explaining code that was produced in this exact opencode session context. Scope: file Path: README.md Diff: ...",
@@ -919,6 +901,17 @@ Thanks!"#,
     }
 
     #[test]
+    fn parse_candidate_answer_skips_non_json_text() {
+        let answer = parse_candidate_answer(&[
+            "Thinking through the diff before I answer.",
+            "I need another pass.",
+        ])
+        .unwrap();
+
+        assert_eq!(answer, None);
+    }
+
+    #[test]
     fn extract_first_json_object_handles_braces_inside_strings() {
         let payload = extract_first_json_object(
             "preface {\"version\":1,\"summary\":\"explain {brace}\",\"purpose\":\"keep explain stable\",\"change\":\"keep parser stable\",\"risk_level\":\"medium\",\"risk_reason\":\"parsing can fail if braces confuse extraction\"} trailing",
@@ -930,6 +923,33 @@ Thanks!"#,
                 "{\"version\":1,\"summary\":\"explain {brace}\",\"purpose\":\"keep explain stable\",\"change\":\"keep parser stable\",\"risk_level\":\"medium\",\"risk_reason\":\"parsing can fail if braces confuse extraction\"}".to_string()
             )
         );
+    }
+
+    #[test]
+    fn parse_answer_from_run_output_reads_text_event_payload() {
+        let output = concat!(
+            "{\"type\":\"step_start\",\"sessionID\":\"ses_run\"}\n",
+            "{\"type\":\"text\",\"sessionID\":\"ses_run\",\"part\":{\"text\":\"{\\\"version\\\":1,\\\"summary\\\":\\\"explain\\\",\\\"purpose\\\":\\\"clarify\\\",\\\"change\\\":\\\"summarize\\\",\\\"risk_level\\\":\\\"low\\\",\\\"risk_reason\\\":\\\"minor\\\"}\"}}\n",
+            "{\"type\":\"step_finish\",\"sessionID\":\"ses_run\"}\n"
+        );
+
+        let answer = parse_answer_from_run_output(output).unwrap().unwrap();
+        assert_eq!(answer.summary, "explain");
+        assert_eq!(answer.purpose, "clarify");
+        assert_eq!(answer.change, "summarize");
+        assert_eq!(answer.risk_level, WhyRiskLevel::Low);
+        assert_eq!(answer.risk_reason, "minor");
+    }
+
+    #[test]
+    fn parse_answer_from_run_output_skips_prompt_echo_text() {
+        let output = concat!(
+            "{\"type\":\"text\",\"sessionID\":\"ses_run\",\"part\":{\"text\":\"You are explaining code that was produced in this exact opencode session context. Return ONLY valid JSON with no markdown, no code fences, and no extra text. Schema exactly: {\\\"version\\\":1,\\\"summary\\\":string,\\\"purpose\\\":string,\\\"change\\\":string,\\\"risk_level\\\":\\\"low\\\"|\\\"medium\\\"|\\\"high\\\",\\\"risk_reason\\\":string}. Scope: file Path: README.md Status: modified Diff: --- README.md +++ README.md\"}}\n",
+            "{\"type\":\"step_finish\",\"sessionID\":\"ses_run\"}\n"
+        );
+
+        let answer = parse_answer_from_run_output(output).unwrap();
+        assert_eq!(answer, None);
     }
 
     #[test]
@@ -1017,6 +1037,52 @@ Thanks!"#,
             json!({
                 "type": "text",
                 "text": "You are explaining code that was produced in this exact opencode session context.\n\nScope: file"
+            }),
+        );
+
+        let service = OpencodeService { repo_path, db_path };
+        let answer = service.latest_assistant_text("ses_1").unwrap();
+        assert_eq!(answer.summary, "useful answer");
+    }
+
+    #[test]
+    fn latest_assistant_text_skips_newer_non_json_assistant_messages() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("opencode.db");
+        let repo_path = temp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+
+        let connection = Connection::open(&db_path).unwrap();
+        create_message_tables(&connection);
+        insert_message(
+            &connection,
+            "ses_1",
+            "msg_answer",
+            1,
+            json!({ "role": "assistant" }),
+        );
+        insert_part(
+            &connection,
+            "ses_1",
+            "msg_answer",
+            1,
+            json!({ "type": "text", "text": r#"{"version":1,"summary":"useful answer","purpose":"clarify the current diff","change":"explain current diff","risk_level":"low","risk_reason":"small chance of over-summary"}"# }),
+        );
+        insert_message(
+            &connection,
+            "ses_1",
+            "msg_noisy",
+            2,
+            json!({ "role": "assistant" }),
+        );
+        insert_part(
+            &connection,
+            "ses_1",
+            "msg_noisy",
+            2,
+            json!({
+                "type": "text",
+                "text": "Thinking through the diff before I answer."
             }),
         );
 

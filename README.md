@@ -162,10 +162,8 @@ cargo run
 | `y` | Accept file or hunk |
 | `x` | Reject file or hunk |
 | `u` | Move file back to unreviewed |
-| `v` | Toggle grouped `Explain` selection on the current hunk header or diff line (within the current file) |
-| `V` | Clear grouped `Explain` selection for the current file |
 | `m` | Choose model for `Explain` (or keep Auto from the attributed context source) |
-| `e` | Explain the selected file, hunk, line, or grouped marked selection in the current file |
+| `e` | Open the `Explain` menu for the current file or hunk |
 | `h` | Open Explain history for this better-review session |
 | `r` | Retry the current explanation |
 | `z` | Cancel the current explanation if it is still running |
@@ -252,9 +250,8 @@ Current limitations to keep in mind:
 - `Explain` shows the active model in the side panel; by default it uses `Auto`, which resolves to the attributed session model when available
 - Press `m` to choose a specific model override for this run
 - Model picker opens immediately and refreshes available models in the background for smoother UX
-- In hunk view, press `v` on hunk headers or diff lines to build a grouped `Explain` selection for the current file
-- Press `V` to clear grouped selection for the current file
-- Press `e` to explain the current file, hunk, or line, or the grouped selection in the current file
+- Press `e` to open the `Explain` menu before running
+- `Explain` scope follows the current review focus: file focus explains the file, hunk focus explains the current hunk
 - Press `h` to inspect session-local Explain history and refocus or clear older runs
 - Output is rendered from a fixed versioned JSON schema so the UI order stays deterministic
 - The explanation is requested through `opencode run --session <id> --fork` (and `--model` when overridden), so it uses the same session context without polluting the active coding thread

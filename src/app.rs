@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -27,8 +27,7 @@ use crate::domain::diff::{DiffLineKind, FileDiff, ReviewStatus};
 use crate::services::git::GitService;
 use crate::services::opencode::{
     OpencodeService, OpencodeSession, WhyAnswer, WhyRiskLevel, WhyTarget, why_target_for_file,
-    why_target_for_hunk, why_target_for_line, why_target_for_selected_hunks,
-    why_target_for_selected_lines,
+    why_target_for_hunk,
 };
 use crate::ui::styles;
 
@@ -79,6 +78,7 @@ struct App {
 enum Overlay {
     None,
     CommitPrompt,
+    ExplainMenu,
     SessionPicker,
     ModelPicker,
     ExplainHistory,
@@ -139,8 +139,8 @@ struct WhyThisUiState {
     current_run_id: Option<u64>,
     history_cursor: usize,
     next_run_id: u64,
-    selections: HashMap<String, WhySelection>,
     model: WhyModelState,
+    return_to_menu: bool,
 }
 
 struct ExplainRun {
@@ -181,18 +181,6 @@ enum WhyModelChoice {
     #[default]
     Auto,
     Explicit(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum WhySelection {
-    Hunks(BTreeSet<usize>),
-    Lines(BTreeSet<SelectedLine>),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct SelectedLine {
-    hunk_index: usize,
-    line_index: usize,
 }
 
 impl App {
@@ -436,7 +424,8 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                                     run.error = None;
                                 }
                                 Err(error) => {
-                                    app.status = format!("Could not explain change: {error}");
+                                    app.status =
+                                        format!("Explain failed: {error}. Press r to retry.");
                                     run.status = ExplainRunStatus::Failed;
                                     run.error = Some(error);
                                     run.result = None;
@@ -465,14 +454,15 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                             app.why_this.model.last_loaded_at = Some(Instant::now());
                             app.why_this.model.last_error = None;
                             if app.overlay == Overlay::ModelPicker {
-                                app.status =
-                                    "Choose the model for Explain (or keep Auto).".to_string();
+                                app.status = "Choose the Explain model, or keep Auto.".to_string();
                             }
                         }
                         Err(error) => {
                             app.why_this.model.last_error = Some(error.clone());
                             if app.overlay == Overlay::ModelPicker {
-                                app.status = format!("Could not load Explain models: {error}");
+                                app.status = format!(
+                                    "Could not load Explain models: {error}. Press m to retry."
+                                );
                             }
                         }
                     }
@@ -502,6 +492,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                         commit_message.input(to_textarea_input(key));
                     }
                 },
+                Overlay::ExplainMenu => handle_explain_menu_key(&mut app, key).await?,
                 Overlay::SessionPicker => handle_session_picker_key(&mut app, key),
                 Overlay::ModelPicker => handle_model_picker_key(&mut app, key),
                 Overlay::ExplainHistory => handle_explain_history_key(&mut app, key),
@@ -686,27 +677,67 @@ async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
             }
         }
         KeyCode::Char('s') => {
-            if app.session_state.sessions.is_empty() {
-                app.status = "No opencode sessions were found for this repository.".to_string();
-            } else {
-                if let Some(selected) = app.session_state.selected {
-                    app.session_state.cursor = selected;
-                }
-                app.overlay = Overlay::SessionPicker;
-                app.status = "Choose which context source Explain should use.".to_string();
-            }
+            app.why_this.return_to_menu = false;
+            open_session_picker(app)
         }
-        KeyCode::Char('e') => {
-            request_explain(app).await?;
+        KeyCode::Char('e') => open_explain_menu(app),
+        KeyCode::Char('h') => {
+            app.why_this.return_to_menu = false;
+            open_explain_history(app)
         }
-        KeyCode::Char('h') => open_explain_history(app),
         KeyCode::Char('r') => retry_current_explain(app).await?,
         KeyCode::Char('z') => cancel_current_explain(app),
-        KeyCode::Char('v') => {
-            toggle_why_selection(app);
+        KeyCode::Char('m') => {
+            app.why_this.return_to_menu = false;
+            open_model_picker(app).await
         }
-        KeyCode::Char('V') => clear_why_selection_for_current_file(app),
-        KeyCode::Char('m') => open_model_picker(app).await,
+        _ => {}
+    }
+
+    Ok(())
+}
+
+async fn handle_explain_menu_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    match key.code {
+        KeyCode::Esc => {
+            app.overlay = Overlay::None;
+            app.why_this.return_to_menu = false;
+            app.status = "Closed the Explain menu.".to_string();
+        }
+        KeyCode::Enter => {
+            if app.opencode.is_none() {
+                app.status = "Explain is unavailable because opencode could not start.".to_string();
+                return Ok(());
+            }
+            if app.active_session().is_none() {
+                app.status =
+                    "No context source is linked to this repository. Press s to choose one."
+                        .to_string();
+                return Ok(());
+            }
+            if current_why_target(&app.review).is_none() {
+                app.status = "Nothing is selected to explain.".to_string();
+                return Ok(());
+            }
+
+            app.overlay = Overlay::None;
+            app.why_this.return_to_menu = false;
+            request_explain(app).await?;
+        }
+        KeyCode::Char('s') => {
+            app.why_this.return_to_menu = true;
+            open_session_picker(app)
+        }
+        KeyCode::Char('m') => {
+            app.why_this.return_to_menu = true;
+            open_model_picker(app).await
+        }
+        KeyCode::Char('h') => {
+            app.why_this.return_to_menu = true;
+            open_explain_history(app)
+        }
+        KeyCode::Char('r') => retry_current_explain(app).await?,
+        KeyCode::Char('z') => cancel_current_explain(app),
         _ => {}
     }
 
@@ -716,8 +747,7 @@ async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
 fn handle_session_picker_key(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => {
-            app.overlay = Overlay::None;
-            app.status = "Session picker closed.".to_string();
+            close_explain_submenu(app, "Session picker closed.");
         }
         KeyCode::Up | KeyCode::Char('k') => {
             app.session_state.cursor = app.session_state.cursor.saturating_sub(1);
@@ -730,7 +760,7 @@ fn handle_session_picker_key(app: &mut App, key: KeyEvent) {
         KeyCode::Enter => {
             app.session_state.selected = Some(app.session_state.cursor);
             app.refresh_auto_model();
-            app.overlay = Overlay::None;
+            close_explain_submenu(app, "Choose a file or hunk, then run Explain.");
             if let Some(session) = app.active_session() {
                 app.status = format!("Explain will use context source {}.", session.title);
             }
@@ -742,8 +772,7 @@ fn handle_session_picker_key(app: &mut App, key: KeyEvent) {
 fn handle_explain_history_key(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => {
-            app.overlay = Overlay::None;
-            app.status = "Explain history closed.".to_string();
+            close_explain_submenu(app, "Closed Explain history.");
         }
         KeyCode::Up | KeyCode::Char('k') => move_explain_history_cursor(app, -1),
         KeyCode::Down | KeyCode::Char('j') => move_explain_history_cursor(app, 1),
@@ -759,8 +788,7 @@ fn handle_model_picker_key(app: &mut App, key: KeyEvent) {
     let max_index = app.why_this.model.available.len();
     match key.code {
         KeyCode::Esc => {
-            app.overlay = Overlay::None;
-            app.status = "Explain model picker closed.".to_string();
+            close_explain_submenu(app, "Closed the Explain model picker.");
         }
         KeyCode::Up | KeyCode::Char('k') => {
             app.why_this.model.cursor = app.why_this.model.cursor.saturating_sub(1);
@@ -782,7 +810,11 @@ fn handle_model_picker_key(app: &mut App, key: KeyEvent) {
                 app.why_this.model.choice = WhyModelChoice::Explicit(model.clone());
                 app.status = format!("Explain model set to {model}.");
             }
-            app.overlay = Overlay::None;
+            if app.why_this.return_to_menu {
+                app.overlay = Overlay::ExplainMenu;
+            } else {
+                app.overlay = Overlay::None;
+            }
         }
         _ => {}
     }
@@ -790,8 +822,8 @@ fn handle_model_picker_key(app: &mut App, key: KeyEvent) {
 
 async fn open_model_picker(app: &mut App) {
     let Some(opencode) = app.opencode.clone() else {
-        app.status = "Explain model selection is unavailable because opencode is not initialized."
-            .to_string();
+        app.status =
+            "Explain model selection is unavailable because opencode is not ready.".to_string();
         return;
     };
 
@@ -805,7 +837,7 @@ async fn open_model_picker(app: &mut App) {
         .last_loaded_at
         .is_some_and(|loaded_at| loaded_at.elapsed() < MODEL_CACHE_TTL);
     if is_cache_fresh && !app.why_this.model.available.is_empty() {
-        app.status = "Choose the model for Explain (or keep Auto).".to_string();
+        app.status = "Choose the Explain model, or keep Auto.".to_string();
         return;
     }
 
@@ -826,18 +858,17 @@ async fn open_model_picker(app: &mut App) {
 
 async fn request_explain(app: &mut App) -> Result<()> {
     let Some(_opencode) = app.opencode.clone() else {
-        app.status =
-            "Explain is unavailable because opencode could not be initialized.".to_string();
+        app.status = "Explain is unavailable because opencode could not start.".to_string();
         return Ok(());
     };
     let Some(session) = app.active_session().cloned() else {
-        app.status = "No context source is attributed to this repository. Press s to choose one."
-            .to_string();
+        app.status =
+            "No context source is linked to this repository. Press s to choose one.".to_string();
         return Ok(());
     };
 
-    let Some((label, target)) = current_why_target(&app.review, &app.why_this) else {
-        app.status = "Nothing is selected for Explain.".to_string();
+    let Some((label, target)) = current_why_target(&app.review) else {
+        app.status = "Nothing is selected to explain.".to_string();
         return Ok(());
     };
 
@@ -867,8 +898,7 @@ async fn request_explain_with_target(
     model_label: String,
 ) -> Result<()> {
     let Some(opencode) = app.opencode.clone() else {
-        app.status =
-            "Explain is unavailable because opencode could not be initialized.".to_string();
+        app.status = "Explain is unavailable because opencode could not start.".to_string();
         return Ok(());
     };
 
@@ -878,7 +908,7 @@ async fn request_explain_with_target(
             app.why_this.current_run_id = Some(run.id);
             app.why_this.history_cursor = index;
         }
-        app.status = "Focused existing explanation.".to_string();
+        app.status = "Focused the existing explanation.".to_string();
         return Ok(());
     }
 
@@ -900,7 +930,7 @@ async fn request_explain_with_target(
         });
         app.why_this.current_run_id = Some(run_id);
         app.why_this.history_cursor = app.why_this.runs.len().saturating_sub(1);
-        app.status = "Loaded cached explanation.".to_string();
+        app.status = "Loaded the cached explanation.".to_string();
         return Ok(());
     }
 
@@ -911,7 +941,7 @@ async fn request_explain_with_target(
     let context_source_id_for_task = context_source_id.clone();
     let tx = app.tx.clone();
 
-    app.status = format!("Explaining {label} using {model_label}.");
+    app.status = format!("Running Explain for {label} with {model_label}.");
 
     let handle = tokio::spawn(async move {
         let result = opencode
@@ -966,6 +996,7 @@ fn draw(frame: &mut ratatui::Frame, app: &App, commit_message: &TextArea<'_>) {
 
     match app.overlay {
         Overlay::CommitPrompt => draw_commit_prompt(frame, layout[1], app, commit_message),
+        Overlay::ExplainMenu => draw_explain_menu(frame, layout[1], app),
         Overlay::SessionPicker => draw_session_picker(frame, layout[1], app),
         Overlay::ModelPicker => draw_model_picker(frame, layout[1], app),
         Overlay::ExplainHistory => draw_explain_history(frame, layout[1], app),
@@ -1208,16 +1239,11 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         ),
     ])];
     if let Some(file) = app.review.files.get(app.review.cursor_file) {
-        let selection = app.why_this.selections.get(file.display_path());
         for (index, hunk) in file.hunks.iter().enumerate() {
             let is_current_hunk =
                 app.review.focus == ReviewFocus::Hunks && app.review.cursor_hunk == index;
             let is_current_line = app.review.focus == ReviewFocus::Hunks
                 && app.review.cursor_line == diff_lines.len();
-            let is_selected_hunk = matches!(
-                selection,
-                Some(WhySelection::Hunks(hunks)) if hunks.contains(&index)
-            );
             let mut style = Style::default()
                 .fg(styles::TEXT_PRIMARY)
                 .bg(styles::SURFACE_RAISED);
@@ -1250,22 +1276,11 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                     ),
                     style,
                 ),
-                Span::styled(
-                    if is_selected_hunk { " [why]" } else { "" },
-                    styles::soft_accent(),
-                ),
                 status,
             ]));
-            for (line_index, line) in hunk.lines.iter().enumerate() {
+            for line in &hunk.lines {
                 let is_current_line = app.review.focus == ReviewFocus::Hunks
                     && app.review.cursor_line == diff_lines.len();
-                let is_selected_line = matches!(
-                    selection,
-                    Some(WhySelection::Lines(lines)) if lines.contains(&SelectedLine {
-                        hunk_index: index,
-                        line_index,
-                    })
-                );
                 let prefix = match line.kind {
                     DiffLineKind::Add => "+",
                     DiffLineKind::Remove => "-",
@@ -1280,8 +1295,6 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                     style
                         .bg(styles::SURFACE_RAISED)
                         .add_modifier(Modifier::UNDERLINED)
-                } else if is_selected_line {
-                    style.bg(styles::ACCENT_DIM)
                 } else {
                     style
                 };
@@ -1295,10 +1308,6 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                     .unwrap_or_else(|| "    ".to_string());
                 diff_lines.push(Line::from(vec![
                     Span::styled(format!("{old} {new} "), styles::subtle()),
-                    Span::styled(
-                        if is_selected_line { "*" } else { " " },
-                        styles::soft_accent(),
-                    ),
                     Span::styled(prefix, style),
                     Span::styled(line.content.clone(), style),
                 ]));
@@ -1475,6 +1484,24 @@ fn draw_model_picker(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     );
 }
 
+fn draw_explain_menu(frame: &mut ratatui::Frame, area: Rect, app: &App) {
+    let modal = centered_rect(64, 46, area);
+    frame.render_widget(Clear, modal);
+    frame.render_widget(
+        Paragraph::new(explain_menu_lines(app))
+            .block(
+                Block::default()
+                    .title(Line::from(Span::styled("Explain", styles::title())))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(styles::ACCENT_BRIGHT))
+                    .style(Style::default().bg(styles::SURFACE_RAISED)),
+            )
+            .style(Style::default().bg(styles::SURFACE_RAISED))
+            .wrap(Wrap { trim: true }),
+        modal,
+    );
+}
+
 fn model_picker_item(
     index: usize,
     label: &str,
@@ -1539,10 +1566,81 @@ fn explain_context_lines(app: &App) -> Vec<Line<'static>> {
         format!("model: {}", why_model_display_label(app)),
         styles::muted(),
     )));
-    if let Some(selection_summary) = current_selection_summary(app) {
-        lines.push(Line::from(Span::styled(selection_summary, styles::muted())));
+    if let Some(scope_preview) = explain_scope_preview(app) {
+        lines.push(Line::from(Span::styled(
+            format!("scope: {scope_preview}"),
+            styles::muted(),
+        )));
     }
     lines
+}
+
+fn explain_menu_lines(app: &App) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Review focus decides the scope.",
+            styles::soft_accent(),
+        )),
+        Line::from(Span::raw("")),
+        explain_menu_detail_line(
+            "Scope",
+            explain_scope_preview(app).unwrap_or_else(|| "nothing selected".to_string()),
+        ),
+        explain_menu_detail_line("Context", explain_context_source_label(app)),
+        explain_menu_detail_line("Model", why_model_display_label(app)),
+        explain_menu_detail_line(
+            "History",
+            format!("{} run(s) this session", app.why_this.runs.len()),
+        ),
+        Line::from(Span::raw("")),
+        Line::from(vec![
+            Span::styled("Enter", styles::keybind()),
+            Span::styled(" run explain", styles::muted()),
+        ]),
+        Line::from(vec![
+            Span::styled("s", styles::keybind()),
+            Span::styled(" choose context", styles::muted()),
+        ]),
+        Line::from(vec![
+            Span::styled("m", styles::keybind()),
+            Span::styled(" choose model", styles::muted()),
+        ]),
+        Line::from(vec![
+            Span::styled("h", styles::keybind()),
+            Span::styled(" open history", styles::muted()),
+        ]),
+        Line::from(vec![
+            Span::styled("r", styles::keybind()),
+            Span::styled(" retry current run", styles::muted()),
+        ]),
+        Line::from(vec![
+            Span::styled("z", styles::keybind()),
+            Span::styled(" cancel current run", styles::muted()),
+        ]),
+        Line::from(vec![
+            Span::styled("Esc", styles::keybind()),
+            Span::styled(" close", styles::muted()),
+        ]),
+    ];
+
+    if app.active_session().is_none() {
+        lines.push(Line::from(Span::raw("")));
+        lines.push(Line::from(Span::styled(
+            "Choose a context source before you run Explain.",
+            Style::default()
+                .fg(styles::DANGER)
+                .add_modifier(Modifier::BOLD),
+        )));
+    }
+
+    lines
+}
+
+fn explain_menu_detail_line(label: &str, value: String) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("{label:<7}"), styles::title()),
+        Span::styled(value, styles::muted()),
+    ])
 }
 
 fn explain_empty_lines() -> Vec<Line<'static>> {
@@ -1551,15 +1649,7 @@ fn explain_empty_lines() -> Vec<Line<'static>> {
         Line::from(Span::styled("Explain the current change", styles::title())),
         Line::from(vec![
             Span::styled(" e ", styles::keybind()),
-            Span::styled("explain current focus or marks", styles::muted()),
-        ]),
-        Line::from(vec![
-            Span::styled(" v ", styles::keybind()),
-            Span::styled("mark current hunk or line", styles::muted()),
-        ]),
-        Line::from(vec![
-            Span::styled(" V ", styles::keybind()),
-            Span::styled("clear marks in current file", styles::muted()),
+            Span::styled("open the Explain menu", styles::muted()),
         ]),
         Line::from(vec![
             Span::styled(" m ", styles::keybind()),
@@ -1583,7 +1673,7 @@ fn explain_empty_lines() -> Vec<Line<'static>> {
         ]),
         Line::from(Span::raw("")),
         Line::from(Span::styled(
-            "Tip: marks are explained together; otherwise Explain uses the current focus.",
+            "Tip: file focus explains the file; hunk focus explains the current hunk.",
             styles::subtle(),
         )),
     ]
@@ -1592,7 +1682,7 @@ fn explain_empty_lines() -> Vec<Line<'static>> {
 fn explain_footer_lines(app: &App) -> Vec<Line<'static>> {
     vec![Line::from(vec![
         Span::styled("e", styles::keybind()),
-        Span::styled(" explain", styles::muted()),
+        Span::styled(" menu", styles::muted()),
         Span::raw("  "),
         Span::styled("h", styles::keybind()),
         Span::styled(
@@ -1721,7 +1811,7 @@ fn render_explain_run_lines(run: &ExplainRun, animation: &AnimatedTextState) -> 
         ExplainRunStatus::Failed => {
             lines.push(Line::from(Span::raw("")));
             lines.push(Line::from(Span::styled(
-                "Couldn't explain this change.",
+                "Explain could not produce a valid answer.",
                 Style::default()
                     .fg(styles::DANGER)
                     .add_modifier(Modifier::BOLD),
@@ -1729,6 +1819,10 @@ fn render_explain_run_lines(run: &ExplainRun, animation: &AnimatedTextState) -> 
             if let Some(error) = &run.error {
                 lines.push(Line::from(Span::raw(error.clone())));
             }
+            lines.push(Line::from(Span::styled(
+                "Press r to retry, or press m to switch models.",
+                styles::muted(),
+            )));
         }
         ExplainRunStatus::Cancelled => {
             lines.push(Line::from(Span::raw("")));
@@ -1793,6 +1887,7 @@ fn focus_history_run(app: &mut App) {
 
     app.why_this.current_run_id = Some(run_id);
     app.overlay = Overlay::None;
+    app.why_this.return_to_menu = false;
     app.status = format!("Focused explain run #{}.", run_id);
 }
 
@@ -1863,9 +1958,37 @@ fn clear_history_run(app: &mut App) {
     clear_run_by_index(app, app.why_this.history_cursor);
 }
 
+fn open_explain_menu(app: &mut App) {
+    app.overlay = Overlay::ExplainMenu;
+    app.why_this.return_to_menu = true;
+    app.status = "Choose a file or hunk, then run Explain.".to_string();
+}
+
+fn open_session_picker(app: &mut App) {
+    if app.session_state.sessions.is_empty() {
+        app.status = "No opencode sessions were found for this repository.".to_string();
+        return;
+    }
+
+    if let Some(selected) = app.session_state.selected {
+        app.session_state.cursor = selected;
+    }
+    app.overlay = Overlay::SessionPicker;
+    app.status = "Choose the context source for Explain.".to_string();
+}
+
+fn close_explain_submenu(app: &mut App, status: &str) {
+    app.overlay = if app.why_this.return_to_menu {
+        Overlay::ExplainMenu
+    } else {
+        Overlay::None
+    };
+    app.status = status.to_string();
+}
+
 fn open_explain_history(app: &mut App) {
     app.overlay = Overlay::ExplainHistory;
-    app.status = "Opened explain history.".to_string();
+    app.status = "Opened Explain history.".to_string();
 }
 
 async fn retry_current_explain(app: &mut App) -> Result<()> {
@@ -1925,6 +2048,22 @@ fn explain_run_status_style(status: &ExplainRunStatus) -> Style {
         ExplainRunStatus::Failed => Style::default().fg(styles::DANGER),
         ExplainRunStatus::Cancelled => styles::muted(),
     }
+}
+
+fn explain_context_source_label(app: &App) -> String {
+    app.active_session()
+        .map(|session| format!("{} ({})", session.title, session.id))
+        .unwrap_or_else(|| "none selected".to_string())
+}
+
+fn explain_scope_preview(app: &App) -> Option<String> {
+    let file = app.review.files.get(app.review.cursor_file)?;
+    if app.review.focus == ReviewFocus::Files || file.hunks.is_empty() {
+        return Some(format!("file {}", file.display_path()));
+    }
+
+    let hunk = file.hunks.get(app.review.cursor_hunk)?;
+    Some(format!("hunk {} {}", file.display_path(), hunk.header))
 }
 
 fn diff_scroll_offset(app: &App, area: Rect, diff_lines: &[Line<'_>]) -> u16 {
@@ -2068,157 +2207,6 @@ fn move_review_cursor_by_line(app: &mut App, delta: isize) {
     }
 }
 
-fn toggle_why_selection(app: &mut App) {
-    if app.review.focus != ReviewFocus::Hunks {
-        app.status =
-            "Open a file hunk or line first, then press v to build a grouped Explain selection."
-                .to_string();
-        return;
-    }
-
-    let Some(file) = app.review.files.get(app.review.cursor_file) else {
-        app.status = "No file is selected for Explain.".to_string();
-        return;
-    };
-    if file.hunks.is_empty() {
-        app.status = "This file has no textual hunks to group for Explain.".to_string();
-        return;
-    }
-
-    let path = file.display_path().to_string();
-    let hunk_index = app
-        .review
-        .cursor_hunk
-        .min(file.hunks.len().saturating_sub(1));
-    let hunk = &file.hunks[hunk_index];
-    let hunk_start = hunk_line_start(file, hunk_index);
-
-    if app.review.cursor_line <= hunk_start {
-        let selected_count = toggle_hunk_selection(&mut app.why_this.selections, &path, hunk_index);
-        app.status = if selected_count == 0 {
-            format!("Cleared Explain hunk selection for {path}.")
-        } else {
-            format!("Selected {selected_count} hunk(s) in {path} for grouped Explain.")
-        };
-        return;
-    }
-
-    let line_index = app.review.cursor_line.saturating_sub(hunk_start + 1);
-    if hunk.lines.get(line_index).is_none() {
-        let selected_count = toggle_hunk_selection(&mut app.why_this.selections, &path, hunk_index);
-        app.status = if selected_count == 0 {
-            format!("Cleared Explain hunk selection for {path}.")
-        } else {
-            format!("Selected {selected_count} hunk(s) in {path} for grouped Explain.")
-        };
-        return;
-    }
-
-    let selected_count = toggle_line_selection(
-        &mut app.why_this.selections,
-        &path,
-        SelectedLine {
-            hunk_index,
-            line_index,
-        },
-    );
-    app.status = if selected_count == 0 {
-        format!("Cleared Explain line selection for {path}.")
-    } else {
-        format!("Selected {selected_count} line(s) in {path} for grouped Explain.")
-    };
-}
-
-fn clear_why_selection_for_current_file(app: &mut App) {
-    let Some(file) = app.review.files.get(app.review.cursor_file) else {
-        app.status = "No file is selected for Explain.".to_string();
-        return;
-    };
-
-    if app
-        .why_this
-        .selections
-        .remove(file.display_path())
-        .is_some()
-    {
-        app.status = format!(
-            "Cleared Explain grouped selection for {}.",
-            file.display_path()
-        );
-    } else {
-        app.status = format!(
-            "No Explain grouped selection set for {}.",
-            file.display_path()
-        );
-    }
-}
-
-fn toggle_hunk_selection(
-    selections: &mut HashMap<String, WhySelection>,
-    path: &str,
-    hunk_index: usize,
-) -> usize {
-    let entry = selections
-        .entry(path.to_string())
-        .or_insert_with(|| WhySelection::Hunks(BTreeSet::new()));
-    if !matches!(entry, WhySelection::Hunks(_)) {
-        *entry = WhySelection::Hunks(BTreeSet::new());
-    }
-
-    let WhySelection::Hunks(hunks) = entry else {
-        unreachable!();
-    };
-    if !hunks.insert(hunk_index) {
-        hunks.remove(&hunk_index);
-    }
-
-    let count = hunks.len();
-    if count == 0 {
-        selections.remove(path);
-    }
-    count
-}
-
-fn toggle_line_selection(
-    selections: &mut HashMap<String, WhySelection>,
-    path: &str,
-    selected_line: SelectedLine,
-) -> usize {
-    let entry = selections
-        .entry(path.to_string())
-        .or_insert_with(|| WhySelection::Lines(BTreeSet::new()));
-    if !matches!(entry, WhySelection::Lines(_)) {
-        *entry = WhySelection::Lines(BTreeSet::new());
-    }
-
-    let WhySelection::Lines(lines) = entry else {
-        unreachable!();
-    };
-    if !lines.insert(selected_line) {
-        lines.remove(&selected_line);
-    }
-
-    let count = lines.len();
-    if count == 0 {
-        selections.remove(path);
-    }
-    count
-}
-
-fn current_selection_summary(app: &App) -> Option<String> {
-    let file = app.review.files.get(app.review.cursor_file)?;
-    let selection = app.why_this.selections.get(file.display_path())?;
-    Some(match selection {
-        WhySelection::Hunks(hunks) if !hunks.is_empty() => {
-            format!("selection: {} hunk(s) in this file", hunks.len())
-        }
-        WhySelection::Lines(lines) if !lines.is_empty() => {
-            format!("selection: {} line(s) in this file", lines.len())
-        }
-        _ => return None,
-    })
-}
-
 fn explain_context_source_line(app: &App) -> String {
     app.active_session()
         .map(|session| format!("context: {} ({})", session.title, session.id))
@@ -2318,43 +2306,8 @@ fn risk_level_label(level: WhyRiskLevel) -> &'static str {
     }
 }
 
-fn current_why_target(
-    review: &ReviewUiState,
-    why_this: &WhyThisUiState,
-) -> Option<(String, WhyTarget)> {
+fn current_why_target(review: &ReviewUiState) -> Option<(String, WhyTarget)> {
     let file = review.files.get(review.cursor_file)?;
-    if let Some(selection) = why_this.selections.get(file.display_path()) {
-        match selection {
-            WhySelection::Hunks(hunk_indexes) if !hunk_indexes.is_empty() => {
-                let hunks = hunk_indexes
-                    .iter()
-                    .filter_map(|index| file.hunks.get(*index))
-                    .collect::<Vec<_>>();
-                if !hunks.is_empty() {
-                    let target = why_target_for_selected_hunks(file, hunks);
-                    let label = target.label();
-                    return Some((label, target));
-                }
-            }
-            WhySelection::Lines(selected_lines) if !selected_lines.is_empty() => {
-                let lines = selected_lines
-                    .iter()
-                    .filter_map(|selected_line| {
-                        let hunk = file.hunks.get(selected_line.hunk_index)?;
-                        let line = hunk.lines.get(selected_line.line_index)?;
-                        Some((hunk, line))
-                    })
-                    .collect::<Vec<_>>();
-                if !lines.is_empty() {
-                    let target = why_target_for_selected_lines(file, lines);
-                    let label = target.label();
-                    return Some((label, target));
-                }
-            }
-            _ => {}
-        }
-    }
-
     if review.focus == ReviewFocus::Files || file.hunks.is_empty() {
         let target = why_target_for_file(file);
         let label = target.label();
@@ -2362,20 +2315,6 @@ fn current_why_target(
     }
 
     let hunk = file.hunks.get(review.cursor_hunk)?;
-    let hunk_start = hunk_line_start(file, review.cursor_hunk);
-    if review.cursor_line <= hunk_start {
-        let target = why_target_for_hunk(file, hunk);
-        let label = target.label();
-        return Some((label, target));
-    }
-
-    let line_index = review.cursor_line.saturating_sub(hunk_start + 1);
-    if let Some(line) = hunk.lines.get(line_index) {
-        let target = why_target_for_line(file, hunk, line);
-        let label = target.label();
-        return Some((label, target));
-    }
-
     let target = why_target_for_hunk(file, hunk);
     let label = target.label();
     Some((label, target))
@@ -2792,8 +2731,7 @@ mod tests {
             focus: ReviewFocus::Files,
         };
 
-        let (label, target) =
-            current_why_target(&review, &WhyThisUiState::default()).expect("target");
+        let (label, target) = current_why_target(&review).expect("target");
         assert_eq!(label, "file src/lib.rs");
         match target {
             WhyTarget::File { path, .. } => assert_eq!(path, "src/lib.rs"),
@@ -2812,8 +2750,7 @@ mod tests {
             focus: ReviewFocus::Hunks,
         };
 
-        let (label, target) =
-            current_why_target(&review, &WhyThisUiState::default()).expect("target");
+        let (label, target) = current_why_target(&review).expect("target");
         assert!(label.starts_with("hunk src/lib.rs"));
         match target {
             WhyTarget::Hunk { header, .. } => assert_eq!(header, "@@ -10,1 +10,1 @@"),
@@ -2822,7 +2759,7 @@ mod tests {
     }
 
     #[test]
-    fn current_why_target_uses_line_scope_inside_hunk_body() {
+    fn current_why_target_uses_hunk_scope_inside_hunk_body() {
         let file = sample_file();
         let review = ReviewUiState {
             files: vec![file.clone()],
@@ -2832,105 +2769,34 @@ mod tests {
             focus: ReviewFocus::Hunks,
         };
 
-        let (label, target) =
-            current_why_target(&review, &WhyThisUiState::default()).expect("target");
-        assert!(label.starts_with("line src/lib.rs"));
+        let (label, target) = current_why_target(&review).expect("target");
+        assert!(label.starts_with("hunk src/lib.rs"));
         match target {
-            WhyTarget::Line { line_content, .. } => assert_eq!(line_content, "new"),
-            _ => panic!("expected line target"),
+            WhyTarget::Hunk { header, .. } => assert_eq!(header, "@@ -1,2 +1,2 @@"),
+            _ => panic!("expected hunk target"),
         }
     }
 
     #[test]
-    fn current_why_target_prefers_grouped_hunk_selection_for_current_file() {
-        let file = sample_file();
-        let review = ReviewUiState {
-            files: vec![file],
+    fn explain_scope_preview_matches_review_focus() {
+        let mut app = sample_app(ReviewUiState {
+            files: vec![sample_file()],
             cursor_file: 0,
-            cursor_hunk: 0,
+            cursor_hunk: 1,
             cursor_line: 0,
-            focus: ReviewFocus::Hunks,
-        };
-        let mut why_this = WhyThisUiState::default();
-        why_this.selections.insert(
-            "src/lib.rs".to_string(),
-            WhySelection::Hunks(BTreeSet::from([0, 1])),
+            focus: ReviewFocus::Files,
+        });
+
+        assert_eq!(
+            explain_scope_preview(&app),
+            Some("file src/lib.rs".to_string())
         );
 
-        let (label, target) = current_why_target(&review, &why_this).expect("target");
-        assert_eq!(label, "2 selected hunk(s) in src/lib.rs");
-        match target {
-            WhyTarget::SelectedHunks { hunks, .. } => assert_eq!(hunks.len(), 2),
-            _ => panic!("expected selected hunks target"),
-        }
-    }
-
-    #[test]
-    fn current_why_target_prefers_grouped_line_selection_for_current_file() {
-        let file = sample_file();
-        let review = ReviewUiState {
-            files: vec![file],
-            cursor_file: 0,
-            cursor_hunk: 0,
-            cursor_line: 0,
-            focus: ReviewFocus::Hunks,
-        };
-        let mut why_this = WhyThisUiState::default();
-        why_this.selections.insert(
-            "src/lib.rs".to_string(),
-            WhySelection::Lines(BTreeSet::from([
-                SelectedLine {
-                    hunk_index: 0,
-                    line_index: 0,
-                },
-                SelectedLine {
-                    hunk_index: 0,
-                    line_index: 1,
-                },
-            ])),
+        app.review.focus = ReviewFocus::Hunks;
+        assert_eq!(
+            explain_scope_preview(&app),
+            Some("hunk src/lib.rs @@ -10,1 +10,1 @@".to_string())
         );
-
-        let (label, target) = current_why_target(&review, &why_this).expect("target");
-        assert_eq!(label, "2 selected line(s) in src/lib.rs");
-        match target {
-            WhyTarget::SelectedLines { lines, .. } => assert_eq!(lines.len(), 2),
-            _ => panic!("expected selected lines target"),
-        }
-    }
-
-    #[test]
-    fn toggle_selection_replaces_mismatched_selection_kind() {
-        let mut selections = HashMap::from([(
-            "src/lib.rs".to_string(),
-            WhySelection::Lines(BTreeSet::from([SelectedLine {
-                hunk_index: 0,
-                line_index: 1,
-            }])),
-        )]);
-
-        let count = toggle_hunk_selection(&mut selections, "src/lib.rs", 1);
-        assert_eq!(count, 1);
-        assert!(matches!(
-            selections.get("src/lib.rs"),
-            Some(WhySelection::Hunks(hunks)) if hunks.contains(&1)
-        ));
-
-        let count = toggle_line_selection(
-            &mut selections,
-            "src/lib.rs",
-            SelectedLine {
-                hunk_index: 0,
-                line_index: 0,
-            },
-        );
-        assert_eq!(count, 1);
-        assert!(matches!(
-            selections.get("src/lib.rs"),
-            Some(WhySelection::Lines(lines)) if lines.contains(&SelectedLine {
-                hunk_index: 0,
-                line_index: 0,
-            })
-        ));
     }
 
     #[test]
@@ -3032,23 +2898,69 @@ mod tests {
     }
 
     #[test]
-    fn clear_why_selection_for_current_file_clears_state_and_status() {
+    fn open_explain_menu_sets_overlay_and_status() {
+        let mut app = sample_app(ReviewUiState {
+            files: vec![sample_file()],
+            ..ReviewUiState::default()
+        });
+
+        open_explain_menu(&mut app);
+
+        assert_eq!(app.overlay, Overlay::ExplainMenu);
+        assert!(app.why_this.return_to_menu);
+        assert!(app.status.contains("Choose a file or hunk"));
+    }
+
+    #[test]
+    fn close_explain_submenu_returns_to_menu_when_requested() {
+        let mut app = sample_app(ReviewUiState {
+            files: vec![sample_file()],
+            ..ReviewUiState::default()
+        });
+        app.overlay = Overlay::ModelPicker;
+        app.why_this.return_to_menu = true;
+
+        close_explain_submenu(&mut app, "Back to explain menu.");
+
+        assert_eq!(app.overlay, Overlay::ExplainMenu);
+        assert_eq!(app.status, "Back to explain menu.");
+    }
+
+    #[test]
+    fn explain_menu_lines_show_scope_and_actions() {
         let mut app = sample_app(ReviewUiState {
             files: vec![sample_file()],
             cursor_file: 0,
+            cursor_hunk: 0,
+            focus: ReviewFocus::Hunks,
             ..ReviewUiState::default()
         });
-        app.why_this.selections.insert(
-            "src/lib.rs".to_string(),
-            WhySelection::Hunks(BTreeSet::from([0])),
+        app.session_state.sessions = vec![OpencodeSession {
+            id: "ses_1".to_string(),
+            title: "Main Session".to_string(),
+            directory: PathBuf::from("."),
+            time_updated: 1,
+        }];
+        app.session_state.selected = Some(0);
+
+        let text = explain_menu_lines(&app)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("Scope  hunk src/lib.rs @@ -1,2 +1,2 @@"));
+        assert!(
+            text.contains("ContextMain Session (ses_1)")
+                || text.contains("Context Main Session (ses_1)")
         );
-
-        clear_why_selection_for_current_file(&mut app);
-        assert!(!app.why_this.selections.contains_key("src/lib.rs"));
-        assert!(app.status.contains("Cleared Explain grouped selection"));
-
-        clear_why_selection_for_current_file(&mut app);
-        assert!(app.status.contains("No Explain grouped selection set"));
+        assert!(text.contains("Enter run explain"));
+        assert!(text.contains("m choose model"));
     }
 
     #[test]
@@ -3091,18 +3003,12 @@ mod tests {
 
     #[test]
     fn explain_panel_lines_show_model_and_selection_guidance() {
-        let mut app = sample_app(ReviewUiState {
+        let app = sample_app(ReviewUiState {
             files: vec![sample_file()],
             cursor_file: 0,
+            focus: ReviewFocus::Files,
             ..ReviewUiState::default()
         });
-        app.why_this.selections.insert(
-            "src/lib.rs".to_string(),
-            WhySelection::Lines(BTreeSet::from([SelectedLine {
-                hunk_index: 0,
-                line_index: 1,
-            }])),
-        );
 
         let text = explain_panel_lines(&app)
             .iter()
@@ -3117,9 +3023,8 @@ mod tests {
 
         assert!(text.contains("model:"));
         assert!(text.contains("Explain the current change"));
-        assert!(text.contains("explain current focus or marks"));
-        assert!(text.contains("mark current hunk or line"));
-        assert!(text.contains("selection: 1 line(s) in this file"));
+        assert!(text.contains("open the Explain menu"));
+        assert!(text.contains("scope: file src/lib.rs"));
     }
 
     #[test]
@@ -3294,6 +3199,6 @@ mod tests {
         app.session_state.selected = None;
 
         request_explain(&mut app).await.unwrap();
-        assert!(app.status.contains("No context source is attributed"));
+        assert!(app.status.contains("No context source is linked"));
     }
 }
