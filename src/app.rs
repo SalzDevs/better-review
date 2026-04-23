@@ -315,8 +315,10 @@ const BRAND_ICON_ALT: &str = "✓";
 const BRAND_WORDMARK: &str = "better-review";
 const MODEL_CACHE_TTL: Duration = Duration::from_secs(180);
 const HOME_CASCADE_GLYPHS: &[char] = &[
-    '0', '1', '[', ']', '{', '}', '(', ')', '/', '\\', '|', '+', '-', '*', '=', ':', '.', '<', '>',
+    '0', '1', 'r', 'v', 'w', 'y', 'x', '[', ']', '{', '}', '(', ')', '/', '\\', '|', '+', '-', '*',
+    '=', ':', '.', '<', '>',
 ];
+const HOME_CASCADE_AMBIENT_GLYPHS: &[char] = &['.', ':', '`'];
 
 fn brand_lockup_width() -> u16 {
     BRAND_ICON.chars().count() as u16 + 2 + BRAND_WORDMARK.chars().count() as u16
@@ -1169,12 +1171,13 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     });
     let card = home_card_rect(inner);
     draw_home_backdrop(frame, inner, card, usize::from(app.logo_animation.frame));
+    draw_home_card_halo(frame, inner, card, usize::from(app.logo_animation.frame));
 
     frame.render_widget(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(styles::BORDER_MUTED))
-            .style(Style::default().bg(styles::SURFACE)),
+            .border_style(Style::default().fg(styles::ACCENT_DIM))
+            .style(Style::default().bg(styles::SURFACE_RAISED)),
         card,
     );
 
@@ -1187,6 +1190,7 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         .constraints([
             Constraint::Min(1),
             Constraint::Length(1),
+            Constraint::Length(1),
             Constraint::Length(2),
             Constraint::Length(2),
             Constraint::Length(2),
@@ -1197,10 +1201,17 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 
     let counts = app.review_counts();
     frame.render_widget(
-        Paragraph::new("Review agent changes before they become commits.")
+        Paragraph::new("Review changes before they become commits")
             .alignment(Alignment::Center)
             .style(styles::accent_bold()),
         sections[1],
+    );
+
+    frame.render_widget(
+        Paragraph::new("Accept only what belongs in the next commit")
+            .alignment(Alignment::Center)
+            .style(styles::muted()),
+        sections[2],
     );
 
     let summary = Line::from(vec![
@@ -1218,25 +1229,25 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     ]);
     frame.render_widget(
         Paragraph::new(summary).alignment(Alignment::Center),
-        sections[2],
+        sections[3],
     );
 
     let queue = Line::from(vec![
-        Span::styled("queue ", styles::subtle()),
+        Span::styled("queue ", styles::soft_accent()),
         Span::styled(
-            format!(
-                "{} files  {} unreviewed  {} accepted  {} rejected",
-                app.review.files.len(),
-                counts.unreviewed,
-                counts.accepted,
-                counts.rejected
-            ),
-            styles::muted(),
+            format!("{} files", app.review.files.len(),),
+            styles::title(),
         ),
+        Span::raw("  "),
+        home_count_span(counts.unreviewed, "unreviewed", styles::TEXT_MUTED),
+        Span::raw("  "),
+        home_count_span(counts.accepted, "accepted", styles::SUCCESS),
+        Span::raw("  "),
+        home_count_span(counts.rejected, "rejected", styles::DANGER),
     ]);
     frame.render_widget(
         Paragraph::new(queue).alignment(Alignment::Center),
-        sections[3],
+        sections[4],
     );
 
     frame.render_widget(
@@ -1244,7 +1255,7 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             .alignment(Alignment::Center)
             .style(styles::muted())
             .wrap(Wrap { trim: true }),
-        sections[4],
+        sections[5],
     );
 
     frame.render_widget(
@@ -1263,16 +1274,27 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         ]))
         .alignment(Alignment::Center)
         .style(styles::soft_accent()),
-        sections[5],
+        sections[6],
     );
 }
 
+fn home_count_span(
+    count: usize,
+    label: &'static str,
+    color: ratatui_core::style::Color,
+) -> Span<'static> {
+    Span::styled(
+        format!("{count} {label}"),
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    )
+}
+
 fn home_card_rect(area: Rect) -> Rect {
-    let width = ((u32::from(area.width) * 72) / 100)
-        .clamp(48, 84)
+    let width = ((u32::from(area.width) * 64) / 100)
+        .clamp(46, 76)
         .min(u32::from(area.width)) as u16;
-    let height = ((u32::from(area.height) * 52) / 100)
-        .clamp(12, 18)
+    let height = ((u32::from(area.height) * 48) / 100)
+        .clamp(13, 17)
         .min(u32::from(area.height)) as u16;
 
     Rect::new(
@@ -1288,19 +1310,42 @@ fn draw_home_backdrop(frame: &mut ratatui::Frame, area: Rect, card: Rect, animat
         return;
     }
 
-    let exclusion = expand_rect_within_area(card, area, 1, 1);
+    let exclusion = expand_rect_within_area(card, area, 2, 1);
     let buffer = frame.buffer_mut();
+
+    for local_y in 0..area.height {
+        for local_x in 0..area.width {
+            let x = area.x + local_x;
+            let y = area.y + local_y;
+            if rect_contains(exclusion, x, y) {
+                continue;
+            }
+            if !home_cascade_ambient_cell_is_active(local_x, local_y, animation_frame) {
+                continue;
+            }
+
+            if let Some(cell) = buffer.cell_mut((x, y)) {
+                cell.set_char(home_cascade_ambient_glyph(
+                    local_x,
+                    local_y,
+                    animation_frame,
+                ))
+                .set_style(Style::default().fg(styles::ACCENT_DIM).bg(styles::BASE_BG));
+            }
+        }
+    }
 
     for local_x in 0..area.width {
         if !home_cascade_column_is_active(local_x) {
             continue;
         }
 
-        let trail_len = 5 + i32::from(local_x % 7);
-        let gap = 3 + i32::from(local_x % 5);
-        let speed = 6 + (animation_frame + usize::from(local_x)) % 5;
+        let depth = home_cascade_lane_depth(local_x);
+        let trail_len = 4 + i32::from(local_x % 6) + i32::from(2_u16.saturating_sub(depth));
+        let gap = 6 + i32::from(local_x % 8) + i32::from(depth) * 2;
+        let speed = 5 + usize::from(depth) * 2 + (usize::from(local_x) % 3);
         let period = i32::from(area.height) + trail_len + gap;
-        let phase = ((animation_frame / speed) as i32 + i32::from(local_x) * 3) % period;
+        let phase = ((animation_frame / speed) as i32 + i32::from(local_x) * 5) % period;
         let head = phase - trail_len;
         let x = area.x + local_x;
 
@@ -1317,14 +1362,28 @@ fn draw_home_backdrop(frame: &mut ratatui::Frame, area: Rect, card: Rect, animat
 
             if let Some(cell) = buffer.cell_mut((x, y)) {
                 cell.set_char(home_cascade_glyph(local_x, local_y as u16, animation_frame))
-                    .set_style(home_cascade_style(distance as u16, trail_len as u16));
+                    .set_style(home_cascade_style(distance as u16, trail_len as u16, depth));
             }
         }
     }
 }
 
 fn home_cascade_column_is_active(local_x: u16) -> bool {
-    local_x % 2 == 0 || local_x % 7 == 0
+    local_x % 4 == 0 || local_x % 9 == 0
+}
+
+fn home_cascade_lane_depth(local_x: u16) -> u16 {
+    ((local_x / 4) + (local_x / 9)) % 3
+}
+
+fn home_cascade_ambient_cell_is_active(local_x: u16, local_y: u16, animation_frame: usize) -> bool {
+    (usize::from(local_x) * 13 + usize::from(local_y) * 7 + animation_frame / 18) % 29 == 0
+}
+
+fn home_cascade_ambient_glyph(local_x: u16, local_y: u16, animation_frame: usize) -> char {
+    let index = (usize::from(local_x) * 5 + usize::from(local_y) * 3 + animation_frame / 12)
+        % HOME_CASCADE_AMBIENT_GLYPHS.len();
+    HOME_CASCADE_AMBIENT_GLYPHS[index]
 }
 
 fn home_cascade_glyph(local_x: u16, local_y: u16, animation_frame: usize) -> char {
@@ -1333,16 +1392,22 @@ fn home_cascade_glyph(local_x: u16, local_y: u16, animation_frame: usize) -> cha
     HOME_CASCADE_GLYPHS[index]
 }
 
-fn home_cascade_style(distance: u16, trail_len: u16) -> Style {
+fn home_cascade_style(distance: u16, trail_len: u16, depth: u16) -> Style {
     let base = Style::default().bg(styles::BASE_BG);
     let distance = u32::from(distance);
     let trail_len = u32::from(trail_len.max(1));
 
     if distance == 0 {
+        if depth >= 2 {
+            return base.fg(styles::ACCENT);
+        }
         return base.fg(styles::ACCENT_BRIGHT).add_modifier(Modifier::BOLD);
     }
 
     if distance * 3 <= trail_len {
+        if depth >= 2 {
+            return base.fg(styles::ACCENT_DIM);
+        }
         return base.fg(styles::ACCENT);
     }
 
@@ -1351,6 +1416,49 @@ fn home_cascade_style(distance: u16, trail_len: u16) -> Style {
     }
 
     base.fg(styles::TEXT_SUBTLE)
+}
+
+fn draw_home_card_halo(frame: &mut ratatui::Frame, area: Rect, card: Rect, animation_frame: usize) {
+    let halo = expand_rect_within_area(card, area, 2, 1);
+    if halo.width == 0 || halo.height == 0 {
+        return;
+    }
+
+    let buffer = frame.buffer_mut();
+    let right = halo.x.saturating_add(halo.width).saturating_sub(1);
+    let bottom = halo.y.saturating_add(halo.height).saturating_sub(1);
+
+    for x in halo.x..=right {
+        for y in [halo.y, bottom] {
+            if rect_contains(card, x, y) {
+                continue;
+            }
+            if let Some(cell) = buffer.cell_mut((x, y)) {
+                cell.set_char(home_halo_glyph(x, y, animation_frame))
+                    .set_style(Style::default().fg(styles::ACCENT_DIM).bg(styles::BASE_BG));
+            }
+        }
+    }
+
+    for y in halo.y..=bottom {
+        for x in [halo.x, right] {
+            if rect_contains(card, x, y) {
+                continue;
+            }
+            if let Some(cell) = buffer.cell_mut((x, y)) {
+                cell.set_char(home_halo_glyph(x, y, animation_frame))
+                    .set_style(Style::default().fg(styles::ACCENT_DIM).bg(styles::BASE_BG));
+            }
+        }
+    }
+}
+
+fn home_halo_glyph(x: u16, y: u16, animation_frame: usize) -> char {
+    if (usize::from(x) + usize::from(y) + animation_frame / 16) % 3 == 0 {
+        '.'
+    } else {
+        ' '
+    }
 }
 
 fn expand_rect_within_area(rect: Rect, area: Rect, horizontal: u16, vertical: u16) -> Rect {
@@ -3164,27 +3272,42 @@ mod tests {
         assert_eq!(rect.y, 15);
 
         let home_card = home_card_rect(Rect::new(2, 1, 96, 30));
-        assert_eq!(home_card.width, 69);
-        assert_eq!(home_card.height, 15);
-        assert_eq!(home_card.x, 15);
-        assert_eq!(home_card.y, 8);
+        assert_eq!(home_card.width, 61);
+        assert_eq!(home_card.height, 14);
+        assert_eq!(home_card.x, 19);
+        assert_eq!(home_card.y, 9);
     }
 
     #[test]
     fn home_cascade_helpers_are_stable() {
         assert!(home_cascade_column_is_active(0));
         assert!(!home_cascade_column_is_active(1));
+        assert!(home_cascade_column_is_active(9));
+        assert_eq!(home_cascade_lane_depth(0), 0);
+        assert_eq!(home_cascade_lane_depth(8), 2);
 
         let glyph = home_cascade_glyph(4, 7, 12);
         assert!(HOME_CASCADE_GLYPHS.contains(&glyph));
 
-        let head = home_cascade_style(0, 7);
+        let ambient = home_cascade_ambient_glyph(4, 7, 12);
+        assert!(HOME_CASCADE_AMBIENT_GLYPHS.contains(&ambient));
+        assert_eq!(home_cascade_ambient_cell_is_active(0, 0, 0), true);
+        assert_eq!(home_cascade_ambient_cell_is_active(1, 0, 0), false);
+
+        let head = home_cascade_style(0, 7, 0);
         assert_eq!(head.fg, Some(styles::ACCENT_BRIGHT));
         assert!(head.add_modifier.contains(Modifier::BOLD));
 
-        let tail = home_cascade_style(6, 7);
+        let background_head = home_cascade_style(0, 7, 2);
+        assert_eq!(background_head.fg, Some(styles::ACCENT));
+        assert!(!background_head.add_modifier.contains(Modifier::BOLD));
+
+        let tail = home_cascade_style(6, 7, 0);
         assert_eq!(tail.fg, Some(styles::TEXT_SUBTLE));
         assert_eq!(tail.bg, Some(styles::BASE_BG));
+
+        assert_eq!(home_halo_glyph(0, 0, 0), '.');
+        assert_eq!(home_halo_glyph(1, 0, 0), ' ');
     }
 
     #[test]
