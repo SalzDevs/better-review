@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -59,7 +58,6 @@ pub async fn run() -> Result<()> {
 }
 
 struct App {
-    repo_path: PathBuf,
     git: GitService,
     opencode: Option<OpencodeService>,
     settings: AppSettings,
@@ -201,7 +199,6 @@ impl App {
             .unwrap_or_else(|_| AppSettings::default());
         let (tx, rx) = mpsc::unbounded_channel();
         let mut app = Self {
-            repo_path,
             git,
             opencode,
             settings,
@@ -210,8 +207,7 @@ impl App {
             saved_model_cursor: 0,
             session_state: SessionUiState::default(),
             why_this: WhyThisUiState::default(),
-            status: "Run your coding agent elsewhere, then open better-review to review changes."
-                .to_string(),
+            status: HOME_DEFAULT_STATUS.to_string(),
             screen: Screen::Home,
             review: ReviewUiState::default(),
             overlay: Overlay::None,
@@ -320,9 +316,9 @@ enum HomeState {
 }
 
 struct HomeContent {
-    headline: &'static str,
-    subhead: &'static str,
-    status: String,
+    title: &'static str,
+    detail: &'static str,
+    status: Option<String>,
     key_hints: Vec<(&'static str, &'static str)>,
 }
 
@@ -330,6 +326,8 @@ const BRAND_ICON: &str = "⌕";
 const BRAND_ICON_ALT: &str = "✓";
 const BRAND_WORDMARK: &str = "better-review";
 const MODEL_CACHE_TTL: Duration = Duration::from_secs(180);
+const HOME_DEFAULT_STATUS: &str =
+    "Run your coding agent elsewhere, then open better-review to review changes.";
 const HOME_CASCADE_GLYPHS: &[char] = &[
     '0', '1', 'r', 'v', 'w', 'y', 'x', '[', ']', '{', '}', '(', ')', '/', '\\', '|', '+', '-', '*',
     '=', ':', '.', '<', '>',
@@ -1186,6 +1184,9 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         vertical: 1,
     });
     let card = home_card_rect(inner);
+    let counts = app.review_counts();
+    let home_state = home_state(&counts, app.review.files.len(), app.review_busy);
+    let home_content = home_content(home_state, app.status.as_str());
     draw_home_backdrop(frame, inner, card, usize::from(app.logo_animation.frame));
     draw_home_card_halo(frame, inner, card, usize::from(app.logo_animation.frame));
 
@@ -1206,83 +1207,47 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         .constraints([
             Constraint::Min(1),
             Constraint::Length(1),
+            Constraint::Length(if home_content.detail.is_empty() { 0 } else { 1 }),
             Constraint::Length(1),
-            Constraint::Length(2),
-            Constraint::Length(2),
-            Constraint::Length(2),
             Constraint::Length(1),
+            Constraint::Length(if home_content.status.is_some() { 2 } else { 0 }),
             Constraint::Min(1),
         ])
         .split(content);
 
-    let counts = app.review_counts();
-    let home_state = home_state(&counts, app.review.files.len(), app.review_busy);
-    let home_content = home_content(home_state, app.status.as_str());
     frame.render_widget(
-        Paragraph::new(home_content.headline)
+        Paragraph::new(home_content.title)
             .alignment(Alignment::Center)
             .style(styles::accent_bold()),
         sections[1],
     );
 
-    frame.render_widget(
-        Paragraph::new(home_content.subhead)
-            .alignment(Alignment::Center)
-            .style(styles::muted()),
-        sections[2],
-    );
+    if !home_content.detail.is_empty() {
+        frame.render_widget(
+            Paragraph::new(home_content.detail)
+                .alignment(Alignment::Center)
+                .style(styles::muted()),
+            sections[2],
+        );
+    }
 
-    let summary = Line::from(vec![
-        Span::styled("repo ", styles::subtle()),
-        Span::styled(
-            app.repo_path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or("repo"),
-            styles::title(),
-        ),
-        Span::raw("  |  "),
-        Span::styled("mode ", styles::subtle()),
-        Span::styled("review", styles::title()),
-    ]);
-    frame.render_widget(
-        Paragraph::new(summary).alignment(Alignment::Center),
-        sections[3],
-    );
+    draw_home_progress(frame, sections[3], &counts);
 
-    let queue = Line::from(vec![
-        Span::styled("queue ", styles::soft_accent()),
-        Span::styled(
-            format!("{} files", app.review.files.len(),),
-            styles::title(),
-        ),
-        Span::raw("  "),
-        home_count_span(counts.unreviewed, "unreviewed", styles::TEXT_MUTED),
-        Span::raw("  "),
-        home_count_span(counts.accepted, "accepted", styles::SUCCESS),
-        Span::raw("  "),
-        home_count_span(counts.rejected, "rejected", styles::DANGER),
-    ]);
-    frame.render_widget(
-        Paragraph::new(queue).alignment(Alignment::Center),
-        sections[4],
-    );
-
-    draw_home_progress(frame, sections[5], &counts);
-
-    frame.render_widget(
-        Paragraph::new(home_content.status)
-            .alignment(Alignment::Center)
-            .style(styles::muted())
-            .wrap(Wrap { trim: true }),
-        sections[6],
-    );
+    if let Some(status) = home_content.status {
+        frame.render_widget(
+            Paragraph::new(status)
+                .alignment(Alignment::Center)
+                .style(styles::muted())
+                .wrap(Wrap { trim: true }),
+            sections[5],
+        );
+    }
 
     frame.render_widget(
         Paragraph::new(home_key_hint_line(&home_content.key_hints))
             .alignment(Alignment::Center)
             .style(styles::soft_accent()),
-        sections[7],
+        sections[4],
     );
 }
 
@@ -1303,17 +1268,17 @@ fn home_state(counts: &ReviewCounts, file_count: usize, review_busy: bool) -> Ho
 }
 
 fn home_content(state: HomeState, status: &str) -> HomeContent {
-    let (headline, subhead, fallback_status, key_hints) = match state {
+    let (title, detail, fallback_status, key_hints) = match state {
         HomeState::Empty => (
-            "No changes to review",
-            "Run your agent or edit files, then reopen better-review.",
-            "Your worktree is clean from better-review's point of view.",
+            "No changes",
+            "Run your agent, then reopen better-review.",
+            Some("Worktree is clean."),
             vec![("s", "settings"), ("Ctrl+C", "quit")],
         ),
         HomeState::NeedsReview => (
-            "Review changes before they become commits",
-            "Accept only what belongs in the next commit.",
-            "Start with the unreviewed queue.",
+            "Review queue",
+            "",
+            None,
             vec![
                 ("Enter", "review"),
                 ("c", "commit"),
@@ -1322,9 +1287,9 @@ fn home_content(state: HomeState, status: &str) -> HomeContent {
             ],
         ),
         HomeState::ReadyToCommit => (
-            "Accepted changes are ready",
-            "Commit the reviewed set, or return to inspect the diff.",
-            "Only accepted staged changes will be committed.",
+            "Ready to commit",
+            "",
+            None,
             vec![
                 ("c", "commit"),
                 ("Enter", "review"),
@@ -1333,31 +1298,36 @@ fn home_content(state: HomeState, status: &str) -> HomeContent {
             ],
         ),
         HomeState::NothingAccepted => (
-            "Nothing accepted for commit",
+            "Nothing accepted",
             "Rejected changes stay in your worktree.",
-            "Review again if any rejected work should be accepted.",
+            None,
             vec![("Enter", "review"), ("s", "settings"), ("Ctrl+C", "quit")],
         ),
         HomeState::Busy => (
-            "Updating review state",
-            "Applying your latest accept or reject decision.",
-            "Wait for the current review update to finish.",
+            "Updating review",
+            "",
+            Some("Applying latest decision."),
             vec![("s", "settings"), ("Ctrl+C", "quit")],
         ),
     };
 
-    let status = if status.trim().is_empty() {
-        fallback_status.to_string()
+    let status = if should_show_home_status(status) {
+        Some(status.to_string())
     } else {
-        status.to_string()
+        fallback_status.map(str::to_string)
     };
 
     HomeContent {
-        headline,
-        subhead,
+        title,
+        detail,
         status,
         key_hints,
     }
+}
+
+fn should_show_home_status(status: &str) -> bool {
+    let status = status.trim();
+    !status.is_empty() && status != HOME_DEFAULT_STATUS
 }
 
 fn home_key_hint_line(hints: &[(&'static str, &'static str)]) -> Line<'static> {
@@ -1448,17 +1418,6 @@ fn reviewed_progress_segments(counts: &ReviewCounts, reviewed_segments: usize) -
     }
 
     (accepted_segments, rejected_segments)
-}
-
-fn home_count_span(
-    count: usize,
-    label: &'static str,
-    color: ratatui_core::style::Color,
-) -> Span<'static> {
-    Span::styled(
-        format!("{count} {label}"),
-        Style::default().fg(color).add_modifier(Modifier::BOLD),
-    )
 }
 
 fn home_card_rect(area: Rect) -> Rect {
@@ -3205,11 +3164,11 @@ mod tests {
     use super::*;
     use crate::domain::diff::{DiffLine, DiffLineKind, FileDiff, FileStatus, Hunk, ReviewStatus};
     use crate::settings::ExplainSettings;
+    use std::path::PathBuf;
 
     fn sample_app(review: ReviewUiState) -> App {
         let (tx, rx) = mpsc::unbounded_channel();
         App {
-            repo_path: PathBuf::from("."),
             git: GitService::new("."),
             opencode: None,
             settings: AppSettings::default(),
@@ -3386,13 +3345,19 @@ mod tests {
     #[test]
     fn home_content_and_key_hints_follow_state() {
         let empty = home_content(HomeState::Empty, "");
-        assert_eq!(empty.headline, "No changes to review");
-        assert!(empty.status.contains("worktree is clean"));
+        assert_eq!(empty.title, "No changes");
+        assert_eq!(empty.detail, "Run your agent, then reopen better-review.");
+        assert_eq!(empty.status, Some("Worktree is clean.".to_string()));
         assert_eq!(empty.key_hints, vec![("s", "settings"), ("Ctrl+C", "quit")]);
 
+        let queue = home_content(HomeState::NeedsReview, HOME_DEFAULT_STATUS);
+        assert_eq!(queue.title, "Review queue");
+        assert_eq!(queue.detail, "");
+        assert_eq!(queue.status, None);
+
         let ready = home_content(HomeState::ReadyToCommit, "Accepted hunk.");
-        assert_eq!(ready.headline, "Accepted changes are ready");
-        assert_eq!(ready.status, "Accepted hunk.");
+        assert_eq!(ready.title, "Ready to commit");
+        assert_eq!(ready.status, Some("Accepted hunk.".to_string()));
         assert_eq!(ready.key_hints[0], ("c", "commit"));
 
         let text = home_key_hint_line(&ready.key_hints)
@@ -3402,6 +3367,8 @@ mod tests {
             .collect::<String>();
         assert!(text.starts_with("c commit"));
         assert!(text.contains("Enter review"));
+        assert!(!should_show_home_status(HOME_DEFAULT_STATUS));
+        assert!(should_show_home_status("Accepted hunk."));
     }
 
     #[test]
