@@ -123,8 +123,8 @@ If the repository already had staged changes when `better-review` opened, the ap
 Current behavior:
 
 - `better-review` automatically picks the most recently updated local `opencode` session for the current repository when one exists
-- Press `,` to open Settings and change the persistent default Explain model or startup behavior
-- Press `s` to choose a different context source
+- Press `s` to open Settings and change the persistent default Explain model
+- Press `c` in the Explain menu to choose a different context source
 - Press `e` to open the Explain menu
 - Explain scope follows review focus:
   - file focus explains the current file
@@ -154,9 +154,9 @@ If `opencode` is unavailable, the rest of `better-review` still works normally.
 | `x` | Reject current file or hunk |
 | `u` | Move current file back to unreviewed |
 | `c` | Open commit prompt |
-| `,` | Open settings |
+| `s` | Open settings |
 | `e` | Open the Explain menu |
-| `s` | Choose Explain context source |
+| `c` | Choose Explain context source from Explain menu |
 | `m` | Choose Explain model for the current session |
 | `h` | Open Explain history |
 | `r` | Retry the current Explain run |

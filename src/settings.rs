@@ -11,7 +11,6 @@ const SETTINGS_DIR_NAME: &str = "better-review";
 #[serde(default)]
 pub struct AppSettings {
     pub version: u8,
-    pub ui: UiSettings,
     pub explain: ExplainSettings,
 }
 
@@ -19,34 +18,9 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             version: 1,
-            ui: UiSettings::default(),
             explain: ExplainSettings::default(),
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct UiSettings {
-    pub start_screen: StartScreen,
-    pub reduced_motion: bool,
-}
-
-impl Default for UiSettings {
-    fn default() -> Self {
-        Self {
-            start_screen: StartScreen::Home,
-            reduced_motion: false,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum StartScreen {
-    #[default]
-    Home,
-    ReviewIfChanges,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -132,10 +106,6 @@ mod tests {
         let store = SettingsStore::from_path(path.clone());
         let settings = AppSettings {
             version: 1,
-            ui: UiSettings {
-                start_screen: StartScreen::ReviewIfChanges,
-                reduced_motion: true,
-            },
             explain: ExplainSettings {
                 default_model: Some("openai/gpt-5.4".to_string()),
             },
@@ -146,5 +116,38 @@ mod tests {
         assert_eq!(store.load().unwrap(), settings);
         assert!(store.path().exists());
         assert_eq!(store.path(), path.as_path());
+    }
+
+    #[test]
+    fn load_ignores_legacy_ui_settings_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+        let store = SettingsStore::from_path(path.clone());
+
+        fs::write(
+            &path,
+            r#"{
+  "version": 1,
+  "ui": {
+    "start_screen": "review_if_changes",
+    "reduced_motion": true
+  },
+  "explain": {
+    "default_model": "openai/gpt-5.4"
+  }
+}
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            store.load().unwrap(),
+            AppSettings {
+                version: 1,
+                explain: ExplainSettings {
+                    default_model: Some("openai/gpt-5.4".to_string()),
+                },
+            }
+        );
     }
 }
