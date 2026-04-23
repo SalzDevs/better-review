@@ -62,15 +62,6 @@ pub enum WhyTarget {
         header: String,
         diff: String,
     },
-    Line {
-        path: String,
-        header: String,
-        line_kind: DiffLineKind,
-        old_line: Option<u32>,
-        new_line: Option<u32>,
-        line_content: String,
-        hunk_diff: String,
-    },
 }
 
 impl WhyTarget {
@@ -78,20 +69,6 @@ impl WhyTarget {
         match self {
             Self::File { path, .. } => format!("file {path}"),
             Self::Hunk { path, header, .. } => format!("hunk {path} {header}"),
-            Self::Line {
-                path,
-                old_line,
-                new_line,
-                ..
-            } => {
-                let locator = match (old_line, new_line) {
-                    (Some(old), Some(new)) => format!("old {old}, new {new}"),
-                    (Some(old), None) => format!("old {old}"),
-                    (None, Some(new)) => format!("new {new}"),
-                    (None, None) => "selected line".to_string(),
-                };
-                format!("line {path} ({locator})")
-            }
         }
     }
 
@@ -99,17 +76,6 @@ impl WhyTarget {
         match self {
             Self::File { path, .. } => format!("{session_id}:file:{path}"),
             Self::Hunk { path, header, .. } => format!("{session_id}:hunk:{path}:{header}"),
-            Self::Line {
-                path,
-                old_line,
-                new_line,
-                line_content,
-                ..
-            } => format!(
-                "{session_id}:line:{path}:{}:{}:{line_content}",
-                old_line.map(|value| value.to_string()).unwrap_or_default(),
-                new_line.map(|value| value.to_string()).unwrap_or_default(),
-            ),
         }
     }
 
@@ -127,25 +93,6 @@ impl WhyTarget {
             ),
             Self::Hunk { path, header, diff } => format!(
                 "{instruction}\n\nScope: hunk\nPath: {path}\nHeader: {header}\n\nHunk diff:\n{diff}"
-            ),
-            Self::Line {
-                path,
-                header,
-                line_kind,
-                old_line,
-                new_line,
-                line_content,
-                hunk_diff,
-            } => format!(
-                "{instruction}\n\nScope: line\nPath: {path}\nHunk: {header}\nLine kind: {}\nOld line: {}\nNew line: {}\nSelected line: {}\n\nFull hunk diff:\n{hunk_diff}",
-                line_kind_label(*line_kind),
-                old_line
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "none".to_string()),
-                new_line
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "none".to_string()),
-                line_content,
             ),
         }
     }
@@ -398,18 +345,6 @@ pub fn why_target_for_hunk(file: &FileDiff, hunk: &Hunk) -> WhyTarget {
     }
 }
 
-pub fn why_target_for_line(file: &FileDiff, hunk: &Hunk, line: &DiffLine) -> WhyTarget {
-    WhyTarget::Line {
-        path: file.display_path().to_string(),
-        header: hunk.header.clone(),
-        line_kind: line.kind,
-        old_line: line.old_line,
-        new_line: line.new_line,
-        line_content: line.content.clone(),
-        hunk_diff: diff_text_for_hunk(file, hunk),
-    }
-}
-
 fn diff_text_for_file(file: &FileDiff) -> String {
     let old_path = if file.old_path.is_empty() {
         "/dev/null"
@@ -478,14 +413,7 @@ fn file_status_label(status: crate::domain::diff::FileStatus) -> &'static str {
     }
 }
 
-fn line_kind_label(kind: DiffLineKind) -> &'static str {
-    match kind {
-        DiffLineKind::Add => "added",
-        DiffLineKind::Remove => "removed",
-        DiffLineKind::Context => "context",
-    }
-}
-
+#[cfg(test)]
 fn extract_session_id_from_run_output(output: &str) -> Option<String> {
     session_ids_from_run_output(output).into_iter().next()
 }
@@ -1152,36 +1080,6 @@ Thanks!"#,
         assert!(prompt.contains("Header: @@ -1,2 +1,2 @@"));
         assert!(prompt.contains("+new"));
         assert!(prompt.contains("-old"));
-    }
-
-    #[test]
-    fn builds_line_targets_with_hunk_context() {
-        let file = sample_file();
-        let hunk = &file.hunks[0];
-        let line = &hunk.lines[1];
-        let target = why_target_for_line(&file, hunk, line);
-
-        match target {
-            WhyTarget::Line {
-                path,
-                line_kind,
-                line_content,
-                hunk_diff,
-                ..
-            } => {
-                assert_eq!(path, "src/lib.rs");
-                assert_eq!(line_kind, DiffLineKind::Add);
-                assert_eq!(line_content, "new");
-                assert!(hunk_diff.contains("@@ -1,2 +1,2 @@"));
-                assert!(hunk_diff.contains("+new"));
-            }
-            _ => panic!("expected line target"),
-        }
-
-        let prompt = why_target_for_line(&file, hunk, line).prompt();
-        assert!(prompt.contains("Scope: line"));
-        assert!(prompt.contains("Line kind: added"));
-        assert!(prompt.contains("Selected line: new"));
     }
 
     #[test]
