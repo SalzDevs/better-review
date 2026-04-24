@@ -1,4 +1,5 @@
 target/
+demo/fixture/target/
 
 .DS_Store
 Thumbs.db

@@ -2,6 +2,8 @@
 
 <img src="demo/better-review.gif" alt="better-review demo" width="920" />
 
+Review agent changes, accept only what belongs, commit, and optionally publish.
+
 # better-review
 
 **A review-first terminal UI for code changes before they become commits.**
@@ -34,6 +36,7 @@
 - Optional `Explain` panel backed by local `opencode` sessions
 - Session-local Explain history, retry, cancel, and model selection
 - Configurable single-letter keybindings with duplicate prevention
+- Optional GitHub publish prompt after committing reviewed changes
 - Prebuilt release binaries for Linux and macOS
 
 ## Installation

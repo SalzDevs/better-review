@@ -13,92 +13,66 @@ Set Width 1480
 Set Height 920
 Set Padding 24
 Set Margin 16
-Set MarginFill "#11111b"
-Set BorderRadius 8
+Set MarginFill "#0f1117"
+Set BorderRadius 10
 Set CursorBlink false
-Set TypingSpeed 8ms
-Set PlaybackSpeed 0.92
+Set TypingSpeed 1ms
+Set PlaybackSpeed 1.0
 Set Theme "Catppuccin Mocha"
 Set WindowBar Colorful
 
 Hide
-Type "tmpdir=$(mktemp -d); cp -R demo/fixture/. $tmpdir; git -C $tmpdir init -q; git -C $tmpdir config user.name demo; git -C $tmpdir config user.email demo@example.com; git -C $tmpdir add .; git -C $tmpdir commit -qm init"
-Enter
-Type "cat > $tmpdir/src/lib.rs <<'EOF'"
-Enter
-Type "pub fn greeting(name: &str) -> usize {"
-Enter
-Type "    name.len()"
-Enter
-Type "}"
-Enter
-Type ""
-Enter
-Type "pub fn headline(items: &[&str]) -> usize {"
-Enter
-Type "    items.len()"
-Enter
-Type "}"
-Enter
-Type ""
-Enter
-Type "pub fn summary(values: &[i32]) -> i32 {"
-Enter
-Type "    values.iter().sum()"
-Enter
-Type "}"
-Enter
-Type ""
-Enter
-Type "pub fn footer(values: &[i32]) -> i32 {"
-Enter
-Type "    values.iter().product()"
-Enter
-Type "}"
-Enter
-Type "EOF"
-Enter
-Type "cat > $tmpdir/src/review_queue.rs <<'EOF'"
-Enter
-Type "pub fn pending_summary(total: usize, accepted: usize) -> usize {"
-Enter
-Type "    total.saturating_sub(accepted)"
-Enter
-Type "}"
-Enter
-Type "EOF"
-Enter
-Type "cd $tmpdir && cargo run --manifest-path /home/ricardo/better-review/Cargo.toml"
+Type "repo_root=$PWD; demo_repo=$(bash demo/setup-demo-repo.sh); cd $demo_repo && cargo run --manifest-path $repo_root/Cargo.toml"
 Enter
 Wait+Screen /Enter review/
 Show
 
-Sleep 1000ms
+Sleep 900ms
 Enter
 Wait+Screen /reviewing files/
 
-Sleep 900ms
+Sleep 700ms
 Enter
 Wait+Screen /inspecting hunks/
-Sleep 1000ms
+Sleep 900ms
 Escape
 Wait+Screen /reviewing files/
-Sleep 900ms
+
+Sleep 600ms
+Type "y"
+Wait+Screen /\[✓\] src\/config\.rs/
+
+Sleep 650ms
+Type "j"
+Sleep 500ms
+Type "x"
+Wait+Screen /\[x\] src\/debug\.rs/
+
+Sleep 650ms
+Type "j"
+Sleep 500ms
 Type "y"
 Wait+Screen /\[✓\] src\/lib\.rs/
+
+Sleep 800ms
+Type "s"
+Wait+Screen /Settings/
 Sleep 900ms
-Type "j"
-Sleep 1000ms
-Type "y"
-Wait+Screen /\[✓\] src\/review_queue\.rs/
-Sleep 700ms
-Type "x"
-Wait+Screen /\[x\] src\/review_queue\.rs/
-Sleep 850ms
+Escape
+Wait+Screen /reviewing files/
+
+Sleep 600ms
 Type "c"
 Wait+Screen /Commit prompt active/
-Sleep 700ms
-Type "feat: commit accepted review changes"
 Sleep 500ms
-Ctrl+C
-Sleep 500ms
+Type "feat: review generated changes"
+Sleep 350ms
+Enter
+Wait+Screen /Publish/
+
+Sleep 900ms
+Type "j"
+Sleep 450ms
+Enter
+Wait+Screen /reviewing files/
+Sleep 800ms
