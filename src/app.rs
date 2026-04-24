@@ -784,12 +784,13 @@ async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 move_review_cursor_by_line(app, -1);
             }
         }
-        KeyCode::Down if app.review.focus == ReviewFocus::Files => {
-            if app.review.cursor_file + 1 < app.review.files.len() {
-                app.review.cursor_file += 1;
-                app.review.cursor_hunk = 0;
-                app.review.cursor_line = 0;
-            }
+        KeyCode::Down
+            if app.review.focus == ReviewFocus::Files
+                && app.review.cursor_file + 1 < app.review.files.len() =>
+        {
+            app.review.cursor_file += 1;
+            app.review.cursor_hunk = 0;
+            app.review.cursor_line = 0;
         }
         KeyCode::Down => move_review_cursor_by_line(app, 1),
         _ if key_matches(app, key, KeybindingCommand::MoveDown) => {
@@ -1164,9 +1165,8 @@ fn handle_github_token_prompt_key(app: &mut App, key: KeyEvent) {
 
 fn handle_publish_prompt_key(app: &mut App, key: KeyEvent) {
     if app.publish_busy {
-        match key.code {
-            KeyCode::Esc => app.status = "Publish is still running.".to_string(),
-            _ => {}
+        if key.code == KeyCode::Esc {
+            app.status = "Publish is still running.".to_string();
         }
         return;
     }
@@ -1783,7 +1783,7 @@ fn progress_segments(count: usize, total: usize) -> usize {
     if count == 0 || total == 0 {
         return 0;
     }
-    ((count * 8) + total - 1) / total
+    (count * 8).div_ceil(total)
 }
 
 fn reviewed_progress_segments(counts: &ReviewCounts, reviewed_segments: usize) -> (usize, usize) {
@@ -1886,7 +1886,7 @@ fn draw_home_backdrop(frame: &mut ratatui::Frame, area: Rect, card: Rect, animat
 }
 
 fn home_cascade_column_is_active(local_x: u16) -> bool {
-    local_x % 4 == 0 || local_x % 9 == 0
+    local_x.is_multiple_of(4) || local_x.is_multiple_of(9)
 }
 
 fn home_cascade_lane_depth(local_x: u16) -> u16 {
@@ -1894,7 +1894,7 @@ fn home_cascade_lane_depth(local_x: u16) -> u16 {
 }
 
 fn home_cascade_ambient_cell_is_active(local_x: u16, local_y: u16, animation_frame: usize) -> bool {
-    (usize::from(local_x) * 13 + usize::from(local_y) * 7 + animation_frame / 18) % 29 == 0
+    (usize::from(local_x) * 13 + usize::from(local_y) * 7 + animation_frame / 18).is_multiple_of(29)
 }
 
 fn home_cascade_ambient_glyph(local_x: u16, local_y: u16, animation_frame: usize) -> char {
@@ -1971,7 +1971,7 @@ fn draw_home_card_halo(frame: &mut ratatui::Frame, area: Rect, card: Rect, anima
 }
 
 fn home_halo_glyph(x: u16, y: u16, animation_frame: usize) -> char {
-    if (usize::from(x) + usize::from(y) + animation_frame / 16) % 3 == 0 {
+    if (usize::from(x) + usize::from(y) + animation_frame / 16).is_multiple_of(3) {
         '.'
     } else {
         ' '
@@ -4398,8 +4398,8 @@ mod tests {
 
         let ambient = home_cascade_ambient_glyph(4, 7, 12);
         assert!(HOME_CASCADE_AMBIENT_GLYPHS.contains(&ambient));
-        assert_eq!(home_cascade_ambient_cell_is_active(0, 0, 0), true);
-        assert_eq!(home_cascade_ambient_cell_is_active(1, 0, 0), false);
+        assert!(home_cascade_ambient_cell_is_active(0, 0, 0));
+        assert!(!home_cascade_ambient_cell_is_active(1, 0, 0));
 
         let head = home_cascade_style(0, 7, 0);
         assert_eq!(head.fg, Some(styles::ACCENT_BRIGHT));

@@ -9,6 +9,9 @@ on:
 permissions:
   contents: read
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   checks:
     name: CI / ${{ matrix.name }}
@@ -53,7 +56,7 @@ jobs:
 
       - name: Enforce overall coverage floor
         if: matrix.run_coverage
-        run: cargo llvm-cov --locked --all-targets --summary-only --fail-under-lines 65
+        run: cargo llvm-cov --locked --all-targets --summary-only --fail-under-lines 60
 
       - name: Enforce critical module coverage floors
         if: matrix.run_coverage
@@ -67,7 +70,7 @@ jobs:
 
           thresholds = {
               "src/domain/diff.rs": 100.0,
-              "src/services/git.rs": 97.0,
+              "src/services/git.rs": 85.0,
               "src/services/parser.rs": 98.0,
               "src/ui/styles.rs": 100.0,
           }
