@@ -11,6 +11,28 @@ use crate::services::parser::parse_git_diff;
 const EMPTY_TREE_HASH: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushTarget {
+    pub remote: String,
+    pub branch: String,
+    pub sets_upstream: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PushFailureKind {
+    Authentication,
+    Permission,
+    NoRemote,
+    Rejected,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushFailure {
+    pub kind: PushFailureKind,
+    pub message: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct GitService {
     repo_path: PathBuf,
@@ -82,6 +104,56 @@ impl GitService {
     pub async fn commit_staged(&self, message: &str) -> Result<()> {
         self.run_git(&["commit", "-m", message]).await?;
         Ok(())
+    }
+
+    pub async fn push_target(&self) -> Result<PushTarget> {
+        let branch = self.current_branch().await?;
+        let upstream = self
+            .run_git(&["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+            .await
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+
+        if let Some(upstream) = upstream
+            && let Some((remote, branch)) = upstream.split_once('/')
+        {
+            return Ok(PushTarget {
+                remote: remote.to_string(),
+                branch: branch.to_string(),
+                sets_upstream: false,
+            });
+        }
+
+        let remote = self.default_remote().await?;
+        Ok(PushTarget {
+            remote,
+            branch,
+            sets_upstream: true,
+        })
+    }
+
+    pub async fn push_current_branch(&self, github_token: Option<&str>) -> Result<(), PushFailure> {
+        let target = self.push_target().await.map_err(|error| PushFailure {
+            kind: PushFailureKind::NoRemote,
+            message: explain_push_error(error.to_string()),
+        })?;
+
+        let result = if target.sets_upstream {
+            self.push_with_target(
+                &["push", "-u", &target.remote, &target.branch],
+                github_token,
+            )
+            .await
+        } else {
+            self.push_with_target(&["push", &target.remote, &target.branch], github_token)
+                .await
+        };
+
+        result.map_err(|message| PushFailure {
+            kind: classify_push_error(&message),
+            message: explain_push_error(message),
+        })
     }
 
     async fn diff_between_trees(
@@ -174,6 +246,61 @@ impl GitService {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 
+    async fn current_branch(&self) -> Result<String> {
+        Ok(self
+            .run_git(&["branch", "--show-current"])
+            .await?
+            .trim()
+            .to_string())
+        .and_then(|branch| {
+            if branch.is_empty() {
+                bail!("cannot publish from detached HEAD")
+            }
+            Ok(branch)
+        })
+    }
+
+    async fn default_remote(&self) -> Result<String> {
+        let remotes = self.run_git(&["remote"]).await?;
+        if remotes.lines().any(|remote| remote == "origin") {
+            return Ok("origin".to_string());
+        }
+        remotes
+            .lines()
+            .next()
+            .map(str::to_string)
+            .filter(|remote| !remote.is_empty())
+            .context("no git remote is configured")
+    }
+
+    async fn push_with_target(
+        &self,
+        args: &[&str],
+        github_token: Option<&str>,
+    ) -> Result<(), String> {
+        let askpass = match github_token.filter(|token| !token.trim().is_empty()) {
+            Some(token) => Some(GitAskpass::new(token).map_err(|error| error.to_string())?),
+            None => None,
+        };
+
+        let mut envs = vec![("GIT_TERMINAL_PROMPT", "0"), ("GCM_INTERACTIVE", "never")];
+        if let Some(askpass) = &askpass {
+            envs.push(("GIT_ASKPASS", askpass.path_str()));
+        }
+
+        let output = self
+            .output_git_with_env(args, &envs)
+            .await
+            .map_err(|error| error.to_string())?;
+        if output.status.success() {
+            return Ok(());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Err(if stderr.is_empty() { stdout } else { stderr })
+    }
+
     async fn output_git(&self, args: &[&str]) -> Result<std::process::Output> {
         self.output_git_with_env(args, &[]).await
     }
@@ -193,6 +320,109 @@ impl GitService {
             .await
             .with_context(|| format!("git command timed out {:?}", args))?
             .with_context(|| format!("run git {:?}", args))
+    }
+}
+
+struct GitAskpass {
+    path: PathBuf,
+    path_display: String,
+}
+
+impl GitAskpass {
+    fn new(token: &str) -> Result<Self> {
+        let path = temp_askpass_path();
+        let script = format!(
+            "#!/bin/sh\ncase \"$1\" in\n  *Username*) printf '%s\\n' x-access-token ;;\n  *) printf '%s\\n' {} ;;\nesac\n",
+            shell_single_quote(token)
+        );
+        std::fs::write(&path, script)
+            .with_context(|| format!("failed to write askpass helper {}", path.display()))?;
+        restrict_temp_script_permissions(&path)?;
+        Ok(Self {
+            path_display: path.to_string_lossy().into_owned(),
+            path,
+        })
+    }
+
+    fn path_str(&self) -> &str {
+        &self.path_display
+    }
+}
+
+impl Drop for GitAskpass {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn temp_askpass_path() -> PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or_default();
+    std::env::temp_dir().join(format!(
+        "better-review-{}-{unique}.askpass",
+        std::process::id()
+    ))
+}
+
+fn restrict_temp_script_permissions(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("failed to restrict permissions for {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+pub fn classify_push_error(message: &str) -> PushFailureKind {
+    let normalized = message.to_ascii_lowercase();
+    if normalized.contains("authentication failed")
+        || normalized.contains("could not read username")
+        || normalized.contains("terminal prompts disabled")
+        || normalized.contains("invalid username or password")
+    {
+        PushFailureKind::Authentication
+    } else if normalized.contains("permission denied")
+        || normalized.contains("repository not found")
+        || normalized.contains("write access")
+    {
+        PushFailureKind::Permission
+    } else if normalized.contains("does not appear to be a git repository")
+        || normalized.contains("no git remote")
+    {
+        PushFailureKind::NoRemote
+    } else if normalized.contains("rejected") || normalized.contains("fetch first") {
+        PushFailureKind::Rejected
+    } else {
+        PushFailureKind::Other
+    }
+}
+
+pub fn explain_push_error(message: String) -> String {
+    match classify_push_error(&message) {
+        PushFailureKind::Authentication => {
+            "GitHub authentication failed. Check the token in Settings, then try publishing again."
+                .to_string()
+        }
+        PushFailureKind::Permission => {
+            "GitHub rejected the push. Check that the token has repository write access."
+                .to_string()
+        }
+        PushFailureKind::NoRemote => {
+            "No publish remote is configured for this repository.".to_string()
+        }
+        PushFailureKind::Rejected => {
+            "Git rejected the push because the remote has newer commits. Pull or rebase, then try again."
+                .to_string()
+        }
+        PushFailureKind::Other => format!("Push failed: {}", message.trim()),
     }
 }
 
@@ -270,7 +500,7 @@ pub fn patch_from_hunk(file: &FileDiff, hunk: &crate::domain::diff::Hunk) -> Str
 
 #[cfg(test)]
 mod tests {
-    use super::GitService;
+    use super::{GitService, PushFailureKind, classify_push_error, explain_push_error};
     use anyhow::Result;
     use std::path::Path;
     use tokio::process::Command;
@@ -792,6 +1022,41 @@ mod tests {
             "unexpected commit message error: {message}"
         );
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn push_target_uses_origin_and_current_branch_without_upstream() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let remote = tempfile::tempdir()?;
+        init_repo(temp.path()).await?;
+        init_repo(remote.path()).await?;
+        git(
+            remote.path(),
+            &["config", "receive.denyCurrentBranch", "updateInstead"],
+        )
+        .await?;
+        let remote_path = remote.path().to_string_lossy().into_owned();
+        git(temp.path(), &["remote", "add", "origin", &remote_path]).await?;
+
+        let service = GitService::new(temp.path());
+        let target = service.push_target().await?;
+
+        assert_eq!(target.remote, "origin");
+        assert_eq!(target.branch, "master");
+        assert!(target.sets_upstream);
+        Ok(())
+    }
+
+    #[test]
+    fn classify_push_error_returns_actionable_auth_failures() {
+        assert_eq!(
+            classify_push_error("fatal: could not read Username: terminal prompts disabled"),
+            PushFailureKind::Authentication
+        );
+        assert_eq!(
+            explain_push_error("remote: Repository not found".to_string()),
+            "GitHub rejected the push. Check that the token has repository write access."
+        );
     }
 
     async fn create_merge_conflict(path: &Path) -> Result<()> {

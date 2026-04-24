@@ -12,6 +12,7 @@ const SETTINGS_DIR_NAME: &str = "better-review";
 pub struct AppSettings {
     pub version: u8,
     pub explain: ExplainSettings,
+    pub github: GitHubSettings,
     pub keybindings: KeybindingsSettings,
 }
 
@@ -20,6 +21,7 @@ impl Default for AppSettings {
         Self {
             version: 1,
             explain: ExplainSettings::default(),
+            github: GitHubSettings::default(),
             keybindings: KeybindingsSettings::default(),
         }
     }
@@ -29,6 +31,12 @@ impl Default for AppSettings {
 #[serde(default)]
 pub struct ExplainSettings {
     pub default_model: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct GitHubSettings {
+    pub token: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,13 +113,26 @@ impl SettingsStore {
         let content =
             serde_json::to_string_pretty(settings).context("failed to serialize settings")?;
         fs::write(&self.path, format!("{content}\n"))
-            .with_context(|| format!("failed to write {}", self.path.display()))
+            .with_context(|| format!("failed to write {}", self.path.display()))?;
+        restrict_settings_permissions(&self.path)?;
+        Ok(())
     }
 
     #[cfg(test)]
     pub(crate) fn from_path(path: PathBuf) -> Self {
         Self { path }
     }
+}
+
+fn restrict_settings_permissions(path: &PathBuf) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("failed to restrict permissions for {}", path.display()))?;
+    }
+    Ok(())
 }
 
 fn config_root_dir() -> Result<PathBuf> {
@@ -147,6 +168,7 @@ mod tests {
             explain: ExplainSettings {
                 default_model: Some("openai/gpt-5.4".to_string()),
             },
+            github: GitHubSettings::default(),
             keybindings: KeybindingsSettings::default(),
         };
 
@@ -185,6 +207,7 @@ mod tests {
                 explain: ExplainSettings {
                     default_model: Some("openai/gpt-5.4".to_string()),
                 },
+                github: GitHubSettings::default(),
                 keybindings: KeybindingsSettings::default(),
             }
         );
@@ -210,5 +233,6 @@ mod tests {
         let loaded = store.load().unwrap();
         assert_eq!(loaded.keybindings.refresh, "r");
         assert_eq!(loaded.keybindings.explain_context, "o");
+        assert_eq!(loaded.github, GitHubSettings::default());
     }
 }

@@ -63,8 +63,10 @@ struct App {
     settings: AppSettings,
     settings_store: SettingsStore,
     settings_cursor: usize,
+    github_token_input: TextArea<'static>,
     keybinding_cursor: usize,
     keybinding_capture: Option<KeybindingCommand>,
+    publish_cursor: usize,
     saved_model_cursor: usize,
     session_state: SessionUiState,
     why_this: WhyThisUiState,
@@ -83,6 +85,8 @@ struct App {
 enum Overlay {
     None,
     CommitPrompt,
+    GitHubTokenPrompt,
+    PublishPrompt,
     Settings,
     SettingsModelPicker,
     KeybindingPicker,
@@ -207,8 +211,10 @@ impl App {
             settings,
             settings_store,
             settings_cursor: 0,
+            github_token_input: new_github_token_input(),
             keybinding_cursor: 0,
             keybinding_capture: None,
+            publish_cursor: 0,
             saved_model_cursor: 0,
             session_state: SessionUiState::default(),
             why_this: WhyThisUiState::default(),
@@ -241,6 +247,9 @@ impl App {
         self.saved_model_cursor = saved_model_picker_cursor(
             self.settings.explain.default_model.as_deref(),
             &self.why_this.model.available,
+        );
+        self.github_token_input = new_github_token_input_with_value(
+            self.settings.github.token.as_deref().unwrap_or_default(),
         );
     }
 
@@ -323,10 +332,24 @@ enum HomeState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SettingsRow {
     DefaultExplainModel,
+    GitHubToken,
     Keybindings,
 }
 
-const SETTINGS_ROWS: &[SettingsRow] = &[SettingsRow::DefaultExplainModel, SettingsRow::Keybindings];
+const SETTINGS_ROWS: &[SettingsRow] = &[
+    SettingsRow::DefaultExplainModel,
+    SettingsRow::GitHubToken,
+    SettingsRow::Keybindings,
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublishAction {
+    PushCurrentBranch,
+    NotNow,
+}
+
+const PUBLISH_ACTIONS: &[PublishAction] =
+    &[PublishAction::PushCurrentBranch, PublishAction::NotNow];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KeybindingCommand {
@@ -411,6 +434,17 @@ fn new_commit_message_input() -> TextArea<'static> {
     commit_message
 }
 
+fn new_github_token_input() -> TextArea<'static> {
+    new_github_token_input_with_value("")
+}
+
+fn new_github_token_input_with_value(value: &str) -> TextArea<'static> {
+    let mut input = TextArea::new(vec![value.to_string()]);
+    input.set_placeholder_text("Paste a GitHub token with repository write access");
+    input.set_mask_char('*');
+    input
+}
+
 async fn submit_commit_message(
     app: &mut App,
     commit_message: &mut TextArea<'static>,
@@ -435,11 +469,25 @@ async fn submit_commit_message(
 
     app.git.commit_staged(&message).await?;
     refresh_review_files(app).await?;
-    app.overlay = Overlay::None;
-    app.status = "Committed accepted changes.".to_string();
+    app.overlay = Overlay::PublishPrompt;
+    app.publish_cursor = 0;
+    app.status = "Committed accepted changes. Publish when ready.".to_string();
     *commit_message = new_commit_message_input();
 
     Ok(())
+}
+
+async fn push_reviewed_changes(app: &mut App) {
+    let token = app.settings.github.token.as_deref();
+    match app.git.push_current_branch(token).await {
+        Ok(()) => {
+            app.overlay = Overlay::None;
+            app.status = "Pushed reviewed commit to GitHub.".to_string();
+        }
+        Err(error) => {
+            app.status = error.message;
+        }
+    }
 }
 
 async fn refresh_review_files(app: &mut App) -> Result<()> {
@@ -610,6 +658,8 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                         commit_message.input(to_textarea_input(key));
                     }
                 },
+                Overlay::GitHubTokenPrompt => handle_github_token_prompt_key(&mut app, key),
+                Overlay::PublishPrompt => handle_publish_prompt_key(&mut app, key).await,
                 Overlay::Settings => handle_settings_key(&mut app, key),
                 Overlay::SettingsModelPicker => handle_saved_model_picker_key(&mut app, key),
                 Overlay::KeybindingPicker => handle_keybinding_picker_key(&mut app, key),
@@ -1058,6 +1108,66 @@ fn handle_settings_key(app: &mut App, key: KeyEvent) {
     }
 }
 
+fn handle_github_token_prompt_key(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => {
+            app.github_token_input = new_github_token_input_with_value(
+                app.settings.github.token.as_deref().unwrap_or_default(),
+            );
+            app.overlay = Overlay::Settings;
+            app.status = "GitHub token unchanged.".to_string();
+        }
+        KeyCode::Enter => {
+            let token = app.github_token_input.lines().join("").trim().to_string();
+            app.settings.github.token = if token.is_empty() { None } else { Some(token) };
+            save_settings(app);
+            app.github_token_input = new_github_token_input_with_value(
+                app.settings.github.token.as_deref().unwrap_or_default(),
+            );
+            app.overlay = Overlay::Settings;
+            app.status = if app.settings.github.token.is_some() {
+                "GitHub token saved.".to_string()
+            } else {
+                "GitHub token cleared.".to_string()
+            };
+        }
+        _ => {
+            app.github_token_input.input(to_textarea_input(key));
+        }
+    }
+}
+
+async fn handle_publish_prompt_key(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => {
+            app.overlay = Overlay::None;
+            app.status = "Publish skipped. Commit remains local.".to_string();
+        }
+        KeyCode::Up => {
+            app.publish_cursor = app.publish_cursor.saturating_sub(1);
+        }
+        _ if key_matches(app, key, KeybindingCommand::MoveUp) => {
+            app.publish_cursor = app.publish_cursor.saturating_sub(1);
+        }
+        KeyCode::Down if app.publish_cursor + 1 < PUBLISH_ACTIONS.len() => {
+            app.publish_cursor += 1;
+        }
+        _ if key_matches(app, key, KeybindingCommand::MoveDown)
+            && app.publish_cursor + 1 < PUBLISH_ACTIONS.len() =>
+        {
+            app.publish_cursor += 1;
+        }
+        KeyCode::Enter => match selected_publish_action(app) {
+            PublishAction::PushCurrentBranch => push_reviewed_changes(app).await,
+            PublishAction::NotNow => {
+                app.overlay = Overlay::None;
+                app.status = "Publish skipped. Commit remains local.".to_string();
+            }
+        },
+        _ => {}
+    }
+}
+
 fn handle_keybinding_picker_key(app: &mut App, key: KeyEvent) {
     if let Some(command) = app.keybinding_capture {
         match key.code {
@@ -1124,8 +1234,16 @@ fn handle_keybinding_picker_key(app: &mut App, key: KeyEvent) {
 fn open_selected_settings_row(app: &mut App) {
     match SETTINGS_ROWS[app.settings_cursor.min(SETTINGS_ROWS.len() - 1)] {
         SettingsRow::DefaultExplainModel => open_saved_model_picker(app),
+        SettingsRow::GitHubToken => open_github_token_prompt(app),
         SettingsRow::Keybindings => open_keybinding_picker(app),
     }
+}
+
+fn open_github_token_prompt(app: &mut App) {
+    app.github_token_input =
+        new_github_token_input_with_value(app.settings.github.token.as_deref().unwrap_or_default());
+    app.overlay = Overlay::GitHubTokenPrompt;
+    app.status = "Enter a GitHub token for HTTPS publishing.".to_string();
 }
 
 fn open_keybinding_picker(app: &mut App) {
@@ -1355,6 +1473,8 @@ fn draw(frame: &mut ratatui::Frame, app: &App, commit_message: &TextArea<'_>) {
 
     match app.overlay {
         Overlay::CommitPrompt => draw_commit_prompt(frame, layout[1], app, commit_message),
+        Overlay::GitHubTokenPrompt => draw_github_token_prompt(frame, layout[1], app),
+        Overlay::PublishPrompt => draw_publish_prompt(frame, layout[1], app),
         Overlay::Settings => draw_settings(frame, layout[1], app),
         Overlay::SettingsModelPicker => draw_saved_model_picker(frame, layout[1], app),
         Overlay::KeybindingPicker => draw_keybinding_picker(frame, layout[1], app),
@@ -3031,6 +3151,10 @@ fn selected_keybinding_command(app: &App) -> KeybindingCommand {
     KEYBINDING_COMMANDS[app.keybinding_cursor.min(KEYBINDING_COMMANDS.len() - 1)]
 }
 
+fn selected_publish_action(app: &App) -> PublishAction {
+    PUBLISH_ACTIONS[app.publish_cursor.min(PUBLISH_ACTIONS.len() - 1)]
+}
+
 fn settings_lines(app: &App) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
 
@@ -3060,6 +3184,14 @@ fn settings_row_content(app: &App, row: SettingsRow) -> (&'static str, String) {
         SettingsRow::DefaultExplainModel => (
             "Default model",
             saved_model_label(&app.settings.explain.default_model),
+        ),
+        SettingsRow::GitHubToken => (
+            "GitHub token",
+            if app.settings.github.token.is_some() {
+                "Saved".to_string()
+            } else {
+                "Not set".to_string()
+            },
         ),
         SettingsRow::Keybindings => (
             "Keybindings",
@@ -3265,6 +3397,150 @@ fn draw_commit_prompt(
         Paragraph::new("Only accepted staged changes are committed.").style(styles::muted()),
         lines[3],
     );
+}
+
+fn draw_github_token_prompt(frame: &mut ratatui::Frame, area: Rect, app: &App) {
+    let modal = centered_rect(64, 34, area);
+    frame.render_widget(Clear, modal);
+    let inner = modal.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(2),
+            Constraint::Length(3),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    frame.render_widget(
+        Block::default()
+            .title("GitHub Token")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(styles::BORDER_MUTED))
+            .style(Style::default().bg(styles::SURFACE_RAISED)),
+        modal,
+    );
+    frame.render_widget(
+        Paragraph::new("Used only for HTTPS git push. Stored locally and hidden in the UI.")
+            .style(styles::muted()),
+        sections[0],
+    );
+    frame.render_widget(
+        Paragraph::new("Create a fine-grained token with repository Contents read/write access.")
+            .style(styles::subtle())
+            .wrap(Wrap { trim: true }),
+        sections[1],
+    );
+    frame.render_widget(&app.github_token_input, sections[2]);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Enter", styles::keybind()),
+            Span::styled(" save", styles::muted()),
+            Span::raw("  "),
+            Span::styled("Esc", styles::keybind()),
+            Span::styled(" cancel", styles::muted()),
+        ]))
+        .style(Style::default().bg(styles::SURFACE_RAISED)),
+        sections[3],
+    );
+}
+
+fn draw_publish_prompt(frame: &mut ratatui::Frame, area: Rect, app: &App) {
+    let modal = centered_rect(54, 34, area);
+    frame.render_widget(Clear, modal);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(styles::SURFACE_RAISED)),
+        modal,
+    );
+    let inner = modal.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(3),
+            Constraint::Length(2),
+        ])
+        .split(inner);
+
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled("Publish", styles::title())),
+            Line::from(Span::styled(
+                "Your reviewed commit is local.",
+                styles::muted(),
+            )),
+        ])
+        .style(Style::default().bg(styles::SURFACE_RAISED)),
+        sections[0],
+    );
+
+    let mut state = ListState::default().with_selected(Some(app.publish_cursor));
+    frame.render_stateful_widget(
+        List::new(publish_prompt_items(app))
+            .block(Block::default().style(Style::default().bg(styles::SURFACE_RAISED))),
+        sections[1],
+        &mut state,
+    );
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!(
+                    "{}/{}",
+                    key_for(app, KeybindingCommand::MoveDown),
+                    key_for(app, KeybindingCommand::MoveUp)
+                ),
+                styles::keybind(),
+            ),
+            Span::styled(" move", styles::muted()),
+            Span::raw("  "),
+            Span::styled("Enter", styles::keybind()),
+            Span::styled(" choose", styles::muted()),
+            Span::raw("  "),
+            Span::styled("Esc", styles::keybind()),
+            Span::styled(" later", styles::muted()),
+        ]))
+        .style(Style::default().bg(styles::SURFACE_RAISED)),
+        sections[2],
+    );
+}
+
+fn publish_prompt_items(app: &App) -> Vec<ListItem<'static>> {
+    PUBLISH_ACTIONS
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, action)| {
+            let selected = index == app.publish_cursor;
+            let style = if selected {
+                Style::default()
+                    .fg(styles::TEXT_PRIMARY)
+                    .bg(styles::ACCENT_DIM)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(styles::TEXT_MUTED)
+            };
+            let marker = if selected { ">" } else { " " };
+            ListItem::new(Line::from(Span::styled(
+                format!("{marker} {}", publish_action_label(action)),
+                style,
+            )))
+        })
+        .collect()
+}
+
+fn publish_action_label(action: PublishAction) -> &'static str {
+    match action {
+        PublishAction::PushCurrentBranch => "Push current branch",
+        PublishAction::NotNow => "Not now",
+    }
 }
 
 fn draw_settings(frame: &mut ratatui::Frame, area: Rect, app: &App) {
@@ -3657,8 +3933,10 @@ mod tests {
             settings: AppSettings::default(),
             settings_store: SettingsStore::from_path(PathBuf::from("/tmp/better-review-test.json")),
             settings_cursor: 0,
+            github_token_input: new_github_token_input(),
             keybinding_cursor: 0,
             keybinding_capture: None,
+            publish_cursor: 0,
             saved_model_cursor: 0,
             session_state: SessionUiState::default(),
             why_this: WhyThisUiState::default(),
@@ -4302,6 +4580,7 @@ mod tests {
             explain: ExplainSettings {
                 default_model: Some("openai/gpt-5.4".to_string()),
             },
+            github: crate::settings::GitHubSettings::default(),
             keybindings: KeybindingsSettings::default(),
         };
         app.why_this.model.available = vec!["openai/gpt-5.4".to_string()];
@@ -4349,10 +4628,36 @@ mod tests {
             .join("\n");
 
         assert!(text.contains("Default model"));
+        assert!(text.contains("GitHub token"));
         assert!(text.contains("Keybindings"));
         assert!(!text.contains("Press Enter"));
         assert!(!text.contains("Enter edits"));
         assert!(!text.contains("Config:"));
+    }
+
+    #[test]
+    fn github_token_prompt_saves_and_redacts_setting() {
+        let mut app = sample_app(ReviewUiState {
+            files: vec![sample_file()],
+            ..ReviewUiState::default()
+        });
+        let temp = tempfile::tempdir().unwrap();
+        app.settings_store = SettingsStore::from_path(temp.path().join("config.json"));
+        open_github_token_prompt(&mut app);
+        app.github_token_input = new_github_token_input_with_value("ghp_test_token");
+
+        handle_github_token_prompt_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(app.overlay, Overlay::Settings);
+        assert_eq!(app.settings.github.token.as_deref(), Some("ghp_test_token"));
+        assert!(
+            settings_lines(&app)
+                .iter()
+                .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
+                .collect::<Vec<_>>()
+                .join(" ")
+                .contains("Saved")
+        );
     }
 
     #[test]

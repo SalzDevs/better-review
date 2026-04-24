@@ -117,6 +117,17 @@ If you launch the app before changes exist, or if new changes arrive after the a
 
 If the repository already had staged changes when `better-review` opened, the app will block committing from inside the TUI. That guard exists to avoid mixing unrelated staged work into the commit you are reviewing.
 
+## Publish to GitHub
+
+After a successful commit, `better-review` can push the reviewed commit from the current branch.
+
+- Add a GitHub token in Settings if your remote uses HTTPS authentication
+- The token is hidden in the UI and stored in the local `better-review` settings file
+- Publishing uses `git push` with terminal prompts disabled, so missing or invalid credentials fail with an explanation instead of hanging the TUI
+- If the branch has no upstream, publishing pushes to `origin/<current-branch>` and sets the upstream
+
+Use a fine-grained GitHub token with repository Contents read/write access.
+
 ## Explain (optional)
 
 `Explain` is available when local `opencode` is installed and the repository has local `opencode` session history.
