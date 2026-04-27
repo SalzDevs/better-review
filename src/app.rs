@@ -1595,12 +1595,7 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         ])
         .split(canvas);
 
-    frame.render_widget(
-        Paragraph::new("You decide what ships.")
-            .alignment(Alignment::Left)
-            .style(styles::muted()),
-        rows[0],
-    );
+    draw_home_tagline(frame, rows[0], app);
     draw_home_progress_panel(frame, rows[1], &counts);
     draw_home_command_panel(frame, rows[3], app, &home_content);
     draw_home_tip(frame, rows[5], &home_content, &counts);
@@ -1615,6 +1610,21 @@ fn home_stage_rect(area: Rect) -> Rect {
         width,
         height,
     )
+}
+
+fn draw_home_tagline(frame: &mut ratatui::Frame, area: Rect, _app: &App) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("AI writes the code. You ", styles::muted()),
+            Span::styled("review", styles::accent_bold()),
+            Span::styled(" it.", styles::muted()),
+        ])),
+        area,
+    );
 }
 
 fn home_state(counts: &ReviewCounts, file_count: usize, review_busy: bool) -> HomeState {
