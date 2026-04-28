@@ -292,14 +292,6 @@ pub fn code_remove_bg() -> Color {
     current_palette().code_remove_bg
 }
 
-pub fn code_add_gutter_bg() -> Color {
-    current_palette().code_add_gutter_bg
-}
-
-pub fn code_remove_gutter_bg() -> Color {
-    current_palette().code_remove_gutter_bg
-}
-
 pub fn code_add_gutter_fg() -> Color {
     current_palette().code_add_gutter_fg
 }

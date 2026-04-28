@@ -29,6 +29,7 @@ use crate::services::opencode::{
     why_target_for_hunk,
 };
 use crate::settings::{AppSettings, KeybindingsSettings, SettingsStore, ThemePreset};
+use crate::ui::review::{ReviewRenderRow, ReviewRenderSideLine, build_review_render_rows};
 use crate::ui::styles::{self, Palette};
 
 pub async fn run() -> Result<()> {
@@ -1968,29 +1969,25 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         horizontal: 1,
         vertical: 0,
     });
-    frame.render_widget(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(styles::border_muted()))
-            .style(Style::default().bg(styles::surface())),
-        canvas,
-    );
-    let content = canvas.inner(ratatui::layout::Margin {
-        horizontal: 1,
-        vertical: 0,
-    });
-
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(12), Constraint::Length(3)])
+        .split(canvas);
     let sections = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(36),
-            Constraint::Min(30),
-            Constraint::Length(34),
-        ])
-        .split(content);
+        .constraints([Constraint::Length(34), Constraint::Min(40)])
+        .split(layout[0]);
 
+    draw_review_sidebar(frame, sections[0], app);
+    if let Some(file) = app.review.files.get(app.review.cursor_file) {
+        draw_review_diff(frame, sections[1], app, file);
+        draw_review_footer(frame, layout[1], app, file);
+    }
+}
+
+fn draw_review_sidebar(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     let counts = app.review_counts();
-    let sidebar_title_style = if app.review.focus == ReviewFocus::Files {
+    let title_style = if app.review.focus == ReviewFocus::Files {
         styles::accent_bold()
     } else {
         styles::title()
@@ -2020,7 +2017,6 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             let marker = review_marker(file.review_status.clone(), file.status, false);
             let cursor = if selected { "▸" } else { " " };
             let (tree_prefix, parent, leaf) = tree_sidebar_parts(file.display_path());
-
             let (status_icon, status_style) = match file.status {
                 FileStatus::Added => (
                     "✚",
@@ -2045,175 +2041,529 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                 ),
             };
 
-            let branch_style = styles::subtle().bg(row_bg);
-            let parent_style = Style::default().fg(styles::syntax_comment()).bg(row_bg);
-
             ListItem::new(Line::from(vec![
                 Span::styled(format!("{cursor} {marker} "), row_style),
                 Span::styled(format!("{status_icon} "), status_style),
-                Span::styled(tree_prefix, branch_style),
-                Span::styled(parent, parent_style),
-                Span::styled(truncate_path(&leaf, 24), row_style),
+                Span::styled(tree_prefix, styles::subtle().bg(row_bg)),
+                Span::styled(
+                    parent,
+                    Style::default().fg(styles::syntax_comment()).bg(row_bg),
+                ),
+                Span::styled(truncate_path(&leaf, 20), row_style),
             ]))
         })
         .collect::<Vec<_>>();
 
     let mut sidebar_state = ListState::default().with_selected(Some(app.review.cursor_file));
     frame.render_stateful_widget(
-        List::new(items).block(
-            Block::default()
-                .title(Line::from(vec![
-                    Span::styled("[1] ", sidebar_title_style),
-                    Span::styled("Files", styles::title()),
-                    Span::styled(
-                        format!(
-                            "  {} pending  {} accepted  {} rejected",
-                            counts.unreviewed, counts.accepted, counts.rejected
+        List::new(items)
+            .block(
+                Block::default()
+                    .title(Line::from(vec![
+                        Span::styled(" [1] ", title_style),
+                        Span::styled("Files", styles::title()),
+                        Span::styled(
+                            format!(
+                                "  {} pending  {} accepted  {} rejected",
+                                counts.unreviewed, counts.accepted, counts.rejected
+                            ),
+                            styles::subtle(),
                         ),
-                        styles::subtle(),
-                    ),
-                ]))
-                .borders(Borders::RIGHT)
-                .border_style(
-                    Style::default().fg(if app.review.focus == ReviewFocus::Files {
-                        styles::accent_bright_color()
-                    } else {
-                        styles::border_muted()
-                    }),
-                ),
-        ),
-        sections[0],
+                    ]))
+                    .borders(Borders::ALL)
+                    .border_style(
+                        Style::default().fg(if app.review.focus == ReviewFocus::Files {
+                            styles::accent_bright_color()
+                        } else {
+                            styles::border_muted()
+                        }),
+                    )
+                    .style(Style::default().bg(styles::surface())),
+            )
+            .style(Style::default().bg(styles::surface())),
+        area,
         &mut sidebar_state,
     );
+}
 
-    let mut diff_lines = vec![Line::from(vec![
-        Span::styled(
-            app.review.files[app.review.cursor_file].display_path(),
-            Style::default()
-                .fg(styles::syntax_variable())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            match app.review.focus {
-                ReviewFocus::Files => "reviewing files",
-                ReviewFocus::Hunks => "inspecting hunks",
-            },
-            Style::default().fg(styles::syntax_keyword()),
-        ),
-    ])];
-
-    if let Some(file) = app.review.files.get(app.review.cursor_file) {
-        for (index, hunk) in file.hunks.iter().enumerate() {
-            let is_current_hunk =
-                app.review.focus == ReviewFocus::Hunks && app.review.cursor_hunk == index;
-            let is_current_line = app.review.focus == ReviewFocus::Hunks
-                && app.review.cursor_line == diff_lines.len();
-            let mut style = Style::default()
-                .fg(styles::syntax_function())
-                .bg(styles::surface_raised());
-            if is_current_hunk {
-                style = style.bg(styles::accent_dim()).add_modifier(Modifier::BOLD);
-            }
-            if is_current_line {
-                style = style.add_modifier(Modifier::UNDERLINED);
-            }
-
-            let status = match hunk.review_status {
-                ReviewStatus::Accepted => Span::styled(
-                    " [accepted]",
-                    Style::default()
-                        .fg(styles::success())
-                        .bg(styles::code_add_bg()),
-                ),
-                ReviewStatus::Rejected => Span::styled(
-                    " [rejected]",
-                    Style::default()
-                        .fg(styles::danger())
-                        .bg(styles::code_remove_bg()),
-                ),
-                ReviewStatus::Unreviewed => Span::styled(" [unreviewed]", styles::muted()),
-            };
-
-            diff_lines.push(Line::from(vec![
-                Span::styled(
-                    format!(
-                        "{} {}",
-                        review_marker(hunk.review_status.clone(), file.status, true),
-                        hunk.header,
-                    ),
-                    style,
-                ),
-                status,
-            ]));
-
-            for line in &hunk.lines {
-                let is_current_line = app.review.focus == ReviewFocus::Hunks
-                    && app.review.cursor_line == diff_lines.len();
-                let change_bar = match line.kind {
-                    DiffLineKind::Add | DiffLineKind::Remove => "▌",
-                    DiffLineKind::Context => " ",
-                };
-                let prefix = match line.kind {
-                    DiffLineKind::Add => "+",
-                    DiffLineKind::Remove => "-",
-                    DiffLineKind::Context => " ",
-                };
-                let modifier = if is_current_line {
-                    Modifier::UNDERLINED
-                } else {
-                    Modifier::empty()
-                };
-                let old = line
-                    .old_line
-                    .map(|n| format!("{n:>4}"))
-                    .unwrap_or_else(|| "    ".to_string());
-                let new = line
-                    .new_line
-                    .map(|n| format!("{n:>4}"))
-                    .unwrap_or_else(|| "    ".to_string());
-                let line_style = diff_row_style(line.kind).add_modifier(modifier);
-
-                let mut spans = vec![
-                    Span::styled(
-                        format!("{old} {new} "),
-                        line_number_style(line.kind).add_modifier(modifier),
-                    ),
-                    Span::styled(
-                        change_bar,
-                        diff_change_bar_style(line.kind).add_modifier(modifier),
-                    ),
-                    Span::styled(prefix, diff_marker_style(line.kind).add_modifier(modifier)),
-                    Span::styled(" ", line_style),
-                ];
-                spans.extend(syntax_highlight_diff_content(
-                    &line.content,
-                    line.kind,
-                    modifier,
-                ));
-                diff_lines.push(Line::from(spans));
-            }
-            diff_lines.push(Line::from(Span::raw("")));
-        }
+fn draw_review_diff(frame: &mut ratatui::Frame, area: Rect, app: &App, file: &FileDiff) {
+    if file.is_binary {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::raw("")),
+                Line::from(Span::styled("Binary file", styles::title())),
+                Line::from(Span::raw("")),
+                Line::from(Span::styled(
+                    "This change cannot be shown as a text diff.",
+                    styles::muted(),
+                )),
+            ])
+            .alignment(Alignment::Center)
+            .block(
+                Block::default()
+                    .title(Line::from(Span::styled(
+                        format!(" {} ", file.display_path()),
+                        styles::title(),
+                    )))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(styles::border_muted()))
+                    .style(Style::default().bg(styles::surface())),
+            ),
+            area,
+        );
+        return;
     }
 
-    let diff_scroll = diff_scroll_offset(app, sections[1], &diff_lines);
-    let diff = Paragraph::new(diff_lines).scroll((diff_scroll, 0));
-    frame.render_widget(diff, sections[1]);
+    if file.hunks.is_empty() {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::raw("")),
+                Line::from(Span::styled("No text hunks", styles::title())),
+                Line::from(Span::raw("")),
+                Line::from(Span::styled(
+                    "This file changed, but there is no patch body to render.",
+                    styles::muted(),
+                )),
+            ])
+            .alignment(Alignment::Center)
+            .block(
+                Block::default()
+                    .title(Line::from(Span::styled(
+                        format!(" {} ", file.display_path()),
+                        styles::title(),
+                    )))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(styles::border_muted()))
+                    .style(Style::default().bg(styles::surface())),
+            ),
+            area,
+        );
+        return;
+    }
 
-    let why_block = Block::default()
-        .title(Line::from(Span::styled("Explain", styles::title())))
-        .borders(Borders::LEFT)
-        .border_style(Style::default().fg(styles::border_muted()))
-        .style(Style::default().bg(styles::surface_raised()));
-    let why_lines = explain_panel_lines(app);
+    let rows = build_review_render_rows(file);
+    let diff_focus_style = if app.review.focus == ReviewFocus::Hunks {
+        Style::default().fg(styles::accent_bright_color())
+    } else {
+        Style::default().fg(styles::border_muted())
+    };
+
+    match file.status {
+        FileStatus::Added => {
+            let lines = render_review_panel_lines(app, file, &rows, None, area.width);
+            let scroll = diff_scroll_offset(app, area, &lines);
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .scroll((scroll, 0))
+                    .block(
+                        Block::default()
+                            .title(Line::from(vec![
+                                Span::styled(" [2] ", styles::accent_bold()),
+                                Span::styled("New File", styles::title()),
+                            ]))
+                            .borders(Borders::ALL)
+                            .border_style(diff_focus_style)
+                            .style(Style::default().bg(styles::surface())),
+                    )
+                    .style(Style::default().bg(styles::surface())),
+                area,
+            );
+        }
+        FileStatus::Deleted => {
+            let lines = render_review_panel_lines(app, file, &rows, Some(true), area.width);
+            let scroll = diff_scroll_offset(app, area, &lines);
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .scroll((scroll, 0))
+                    .block(
+                        Block::default()
+                            .title(Line::from(vec![
+                                Span::styled(" [2] ", styles::accent_bold()),
+                                Span::styled("Deleted File", styles::title()),
+                            ]))
+                            .borders(Borders::ALL)
+                            .border_style(diff_focus_style)
+                            .style(Style::default().bg(styles::surface())),
+                    )
+                    .style(Style::default().bg(styles::surface())),
+                area,
+            );
+        }
+        FileStatus::Modified => {
+            let lines = render_review_unified_lines(app, file, area.width.saturating_sub(2));
+            let scroll = diff_scroll_offset(app, area, &lines);
+
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .scroll((scroll, 0))
+                    .block(
+                        Block::default()
+                            .title(Line::from(vec![
+                                Span::styled(" [2] ", styles::accent_bold()),
+                                Span::styled(file.display_path().to_string(), styles::title()),
+                                Span::styled("  unified", styles::subtle()),
+                            ]))
+                            .borders(Borders::ALL)
+                            .border_style(diff_focus_style)
+                            .style(Style::default().bg(styles::surface())),
+                    )
+                    .style(Style::default().bg(styles::surface())),
+                area,
+            );
+        }
+    }
+}
+
+fn render_review_unified_lines(
+    app: &App,
+    file: &FileDiff,
+    content_width: u16,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let mut logical_line = 1;
+
+    for (hunk_index, hunk) in file.hunks.iter().enumerate() {
+        let is_current_hunk =
+            app.review.focus == ReviewFocus::Hunks && app.review.cursor_hunk == hunk_index;
+        let is_current_line =
+            app.review.focus == ReviewFocus::Hunks && app.review.cursor_line == logical_line;
+        let mut header_style =
+            Style::default()
+                .fg(styles::syntax_function())
+                .bg(if is_current_hunk {
+                    styles::accent_dim()
+                } else {
+                    styles::surface_raised()
+                });
+        if is_current_hunk {
+            header_style = header_style.add_modifier(Modifier::BOLD);
+        }
+        if is_current_line {
+            header_style = header_style.add_modifier(Modifier::UNDERLINED);
+        }
+
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(
+                    "{} {}",
+                    review_marker(hunk.review_status.clone(), file.status, true),
+                    hunk.header
+                ),
+                header_style,
+            ),
+            review_hunk_status_span(&hunk.review_status),
+        ]));
+        logical_line += 1;
+
+        for line in &hunk.lines {
+            let is_current_line =
+                app.review.focus == ReviewFocus::Hunks && app.review.cursor_line == logical_line;
+            let modifier = if is_current_line {
+                Modifier::UNDERLINED
+            } else {
+                Modifier::empty()
+            };
+            let old = line
+                .old_line
+                .map(|n| format!("{n:>4}"))
+                .unwrap_or_else(|| "    ".to_string());
+            let new = line
+                .new_line
+                .map(|n| format!("{n:>4}"))
+                .unwrap_or_else(|| "    ".to_string());
+            let marker = match line.kind {
+                DiffLineKind::Add => "+",
+                DiffLineKind::Remove => "-",
+                DiffLineKind::Context => " ",
+            };
+
+            let mut spans = vec![
+                Span::styled(
+                    format!("{old} {new} "),
+                    line_number_style(line.kind).add_modifier(modifier),
+                ),
+                Span::styled(
+                    diff_change_bar(line.kind),
+                    diff_change_bar_style(line.kind).add_modifier(modifier),
+                ),
+                Span::styled(marker, diff_marker_style(line.kind).add_modifier(modifier)),
+                Span::styled(" ", diff_row_style(line.kind).add_modifier(modifier)),
+            ];
+            spans.extend(syntax_highlight_diff_content(
+                &line.content,
+                line.kind,
+                modifier,
+            ));
+            fill_diff_row_background(&mut spans, line.kind, content_width);
+            lines.push(Line::from(spans));
+            logical_line += 1;
+        }
+
+        lines.push(Line::from(Span::raw("")));
+        logical_line += 1;
+    }
+
+    lines
+}
+
+fn render_review_panel_lines(
+    app: &App,
+    file: &FileDiff,
+    rows: &[ReviewRenderRow],
+    old_panel: Option<bool>,
+    panel_width: u16,
+) -> Vec<Line<'static>> {
+    rows.iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let logical_line = index + 1;
+            match row {
+                ReviewRenderRow::HunkHeader {
+                    hunk_index,
+                    header,
+                    status,
+                } => {
+                    let is_current_hunk = app.review.focus == ReviewFocus::Hunks
+                        && app.review.cursor_hunk == *hunk_index;
+                    let is_current_line = app.review.focus == ReviewFocus::Hunks
+                        && app.review.cursor_line == logical_line;
+                    let mut style =
+                        Style::default()
+                            .fg(styles::syntax_function())
+                            .bg(if is_current_hunk {
+                                styles::accent_dim()
+                            } else {
+                                styles::surface_raised()
+                            });
+                    if is_current_hunk {
+                        style = style.add_modifier(Modifier::BOLD);
+                    }
+                    if is_current_line {
+                        style = style.add_modifier(Modifier::UNDERLINED);
+                    }
+
+                    Line::from(vec![
+                        Span::styled(
+                            format!(
+                                "{} {}",
+                                review_marker(status.clone(), file.status, true),
+                                header
+                            ),
+                            style,
+                        ),
+                        review_hunk_status_span(status),
+                    ])
+                }
+                ReviewRenderRow::Diff {
+                    hunk_index,
+                    old,
+                    new,
+                } => {
+                    let is_current_hunk = app.review.focus == ReviewFocus::Hunks
+                        && app.review.cursor_hunk == *hunk_index;
+                    let is_current_line = app.review.focus == ReviewFocus::Hunks
+                        && app.review.cursor_line == logical_line;
+                    let side = match old_panel {
+                        Some(true) => old.as_ref(),
+                        Some(false) => new.as_ref(),
+                        None => new.as_ref(),
+                    };
+                    Line::from(render_review_side_spans(
+                        side,
+                        panel_width,
+                        is_current_hunk,
+                        is_current_line,
+                    ))
+                }
+                ReviewRenderRow::Spacer => Line::from(Span::raw("")),
+            }
+        })
+        .collect()
+}
+
+fn render_review_side_spans(
+    line: Option<&ReviewRenderSideLine>,
+    panel_width: u16,
+    is_current_hunk: bool,
+    is_current_line: bool,
+) -> Vec<Span<'static>> {
+    let modifier = if is_current_line {
+        Modifier::UNDERLINED
+    } else {
+        Modifier::empty()
+    };
+    let mut spans = Vec::new();
+
+    let Some(line) = line else {
+        let placeholder_width = usize::from(panel_width.saturating_sub(8)).clamp(4, 64);
+        spans.push(Span::styled(
+            "     ",
+            styles::subtle().add_modifier(modifier),
+        ));
+        spans.push(Span::styled("  ", styles::subtle().add_modifier(modifier)));
+        spans.push(Span::styled(
+            "╱".repeat(placeholder_width),
+            styles::subtle().add_modifier(modifier),
+        ));
+        return spans;
+    };
+
+    let indicator_style = diff_change_bar_style(line.kind).add_modifier(modifier);
+    let indicator_style = if is_current_hunk {
+        indicator_style.add_modifier(Modifier::BOLD)
+    } else {
+        indicator_style
+    };
+
+    let prefix = line
+        .line_number
+        .map(|number| format!("{number:>4} "))
+        .unwrap_or_else(|| "     ".to_string());
+    let marker = match line.kind {
+        DiffLineKind::Add => "+",
+        DiffLineKind::Remove => "-",
+        DiffLineKind::Context => " ",
+    };
+
+    spans.push(Span::styled(
+        prefix,
+        line_number_style(line.kind).add_modifier(modifier),
+    ));
+    spans.push(Span::styled(diff_change_bar(line.kind), indicator_style));
+    spans.push(Span::styled(
+        marker,
+        diff_marker_style(line.kind).add_modifier(modifier),
+    ));
+    spans.push(Span::styled(
+        " ",
+        diff_row_style(line.kind).add_modifier(modifier),
+    ));
+    spans.extend(syntax_highlight_diff_content(
+        &line.content,
+        line.kind,
+        modifier,
+    ));
+    fill_diff_row_background(&mut spans, line.kind, panel_width);
+    spans
+}
+
+fn fill_diff_row_background(spans: &mut Vec<Span<'static>>, kind: DiffLineKind, width: u16) {
+    let used = spans_width(spans);
+    let target = usize::from(width);
+    if used < target {
+        spans.push(Span::styled(
+            " ".repeat(target - used),
+            diff_row_style(kind),
+        ));
+    }
+}
+
+fn spans_width(spans: &[Span<'_>]) -> usize {
+    spans.iter().map(|span| span.content.chars().count()).sum()
+}
+
+fn review_hunk_status_span(status: &ReviewStatus) -> Span<'static> {
+    match status {
+        ReviewStatus::Accepted => Span::styled(
+            " [accepted]",
+            Style::default()
+                .fg(styles::success())
+                .bg(styles::code_add_bg()),
+        ),
+        ReviewStatus::Rejected => Span::styled(
+            " [rejected]",
+            Style::default()
+                .fg(styles::danger())
+                .bg(styles::code_remove_bg()),
+        ),
+        ReviewStatus::Unreviewed => Span::styled(" [unreviewed]", styles::muted()),
+    }
+}
+
+fn draw_review_footer(frame: &mut ratatui::Frame, area: Rect, app: &App, file: &FileDiff) {
+    let counts = app.review_counts();
+    let footer = Block::default().style(Style::default().bg(styles::surface()));
+    frame.render_widget(footer, area);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(area);
+
+    let focus_label = if app.review.focus == ReviewFocus::Files {
+        "file focus".to_string()
+    } else {
+        format!(
+            "hunk {}/{}",
+            app.review.cursor_hunk.saturating_add(1),
+            file.hunks.len().max(1)
+        )
+    };
+
     frame.render_widget(
-        Paragraph::new(why_lines)
-            .block(why_block)
-            .style(Style::default().bg(styles::surface_raised()))
-            .wrap(Wrap { trim: true }),
-        sections[2],
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!(
+                    " {} / {} ",
+                    app.review.cursor_file + 1,
+                    app.review.files.len()
+                ),
+                Style::default()
+                    .fg(styles::text_primary())
+                    .bg(styles::accent_dim())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                file.display_path().to_string(),
+                Style::default()
+                    .fg(styles::syntax_variable())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("  {focus_label}"), styles::subtle()),
+            Span::styled(
+                format!(
+                    "  {} pending  {} accepted  {} rejected",
+                    counts.unreviewed, counts.accepted, counts.rejected
+                ),
+                styles::muted(),
+            ),
+        ])),
+        rows[0],
     );
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Enter", styles::keybind()),
+            Span::styled(" hunks  ", styles::muted()),
+            Span::styled("Tab", styles::keybind()),
+            Span::styled(" next hunk  ", styles::muted()),
+            key_hint_span(app, KeybindingCommand::Accept),
+            Span::styled(" accept  ", styles::muted()),
+            key_hint_span(app, KeybindingCommand::Reject),
+            Span::styled(" reject  ", styles::muted()),
+            key_hint_span(app, KeybindingCommand::Unreview),
+            Span::styled(" unreview  ", styles::muted()),
+            key_hint_span(app, KeybindingCommand::Explain),
+            Span::styled(" explain  ", styles::muted()),
+            key_hint_span(app, KeybindingCommand::Commit),
+            Span::styled(" commit  ", styles::muted()),
+            Span::styled("Esc", styles::keybind()),
+            Span::styled(" back", styles::muted()),
+        ])),
+        rows[1],
+    );
+
+    let status = if app.status.trim().is_empty() || app.status == HOME_DEFAULT_STATUS {
+        "Review the diff, stage only what belongs, then commit.".to_string()
+    } else {
+        app.status.clone()
+    };
+    frame.render_widget(Paragraph::new(status).style(styles::subtle()), rows[2]);
 }
 
 fn tree_sidebar_parts(path: &str) -> (String, String, String) {
@@ -2837,6 +3187,7 @@ fn draw_explain_history(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     );
 }
 
+#[cfg(test)]
 fn explain_panel_lines(app: &App) -> Vec<Line<'static>> {
     let mut lines = explain_context_lines(app);
 
@@ -2938,6 +3289,7 @@ fn explain_menu_detail_line(label: &str, value: String) -> Line<'static> {
     ])
 }
 
+#[cfg(test)]
 fn explain_empty_lines(app: &App) -> Vec<Line<'static>> {
     vec![
         Line::from(Span::raw("")),
@@ -2992,6 +3344,7 @@ fn explain_empty_lines(app: &App) -> Vec<Line<'static>> {
     ]
 }
 
+#[cfg(test)]
 fn explain_footer_lines(app: &App) -> Vec<Line<'static>> {
     vec![Line::from(vec![
         key_hint_span(app, KeybindingCommand::Explain),
@@ -3186,6 +3539,7 @@ fn find_reusable_explain_run_index(why_this: &WhyThisUiState, cache_key: &str) -
     })
 }
 
+#[cfg(test)]
 fn current_explain_run(app: &App) -> Option<&ExplainRun> {
     let run_id = app.why_this.current_run_id?;
     app.why_this.runs.iter().find(|run| run.id == run_id)
@@ -3648,10 +4002,8 @@ fn diff_scroll_offset(app: &App, area: Rect, diff_lines: &[Line<'_>]) -> u16 {
 
     let total_lines = diff_lines.len();
     let max_scroll = total_lines.saturating_sub(visible_height);
-    let preferred_top = app
-        .review
-        .cursor_line
-        .saturating_sub(visible_height.saturating_sub(3));
+    let selected_row = app.review.cursor_line.saturating_sub(1);
+    let preferred_top = selected_row.saturating_sub(visible_height.saturating_sub(3));
     preferred_top.min(max_scroll).min(u16::MAX as usize) as u16
 }
 
@@ -3941,40 +4293,15 @@ fn draw_settings(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 }
 
 fn review_render_line_count(file: &FileDiff) -> usize {
-    1 + file
-        .hunks
-        .iter()
-        .map(|hunk| 2 + hunk.lines.len())
-        .sum::<usize>()
+    crate::ui::review::review_render_line_count(file)
 }
 
 fn hunk_line_start(file: &FileDiff, hunk_index: usize) -> usize {
-    let mut line = 1;
-    for (index, hunk) in file.hunks.iter().enumerate() {
-        if index == hunk_index {
-            return line;
-        }
-        line += 2 + hunk.lines.len();
-    }
-    0
+    crate::ui::review::hunk_line_start(file, hunk_index)
 }
 
 fn hunk_index_for_line(file: &FileDiff, line_index: usize) -> usize {
-    if file.hunks.is_empty() {
-        return 0;
-    }
-
-    let mut current_line = 1;
-    let mut current_hunk = 0;
-    for (index, hunk) in file.hunks.iter().enumerate() {
-        let hunk_end = current_line + hunk.lines.len();
-        if line_index <= hunk_end {
-            return index;
-        }
-        current_line = hunk_end + 1;
-        current_hunk = index;
-    }
-    current_hunk
+    crate::ui::review::hunk_index_for_line(file, line_index)
 }
 
 fn sync_cursor_line_to_hunk(review: &mut ReviewUiState) {
@@ -4009,41 +4336,73 @@ fn move_review_cursor_by_line(app: &mut App, delta: isize) {
 
 fn line_number_style(kind: DiffLineKind) -> Style {
     match kind {
-        DiffLineKind::Add => Style::default()
-            .fg(styles::syntax_comment())
-            .bg(styles::code_add_gutter_bg()),
-        DiffLineKind::Remove => Style::default()
-            .fg(styles::syntax_comment())
-            .bg(styles::code_remove_gutter_bg()),
-        DiffLineKind::Context => styles::subtle(),
+        DiffLineKind::Add | DiffLineKind::Remove => Style::default()
+            .fg(diff_change_bar_color(kind))
+            .bg(styles::surface_raised()),
+        DiffLineKind::Context => styles::subtle().bg(styles::surface_raised()),
+    }
+}
+
+fn diff_change_bar(kind: DiffLineKind) -> &'static str {
+    match kind {
+        DiffLineKind::Add | DiffLineKind::Remove => "█",
+        DiffLineKind::Context => " ",
     }
 }
 
 fn diff_change_bar_style(kind: DiffLineKind) -> Style {
     match kind {
-        DiffLineKind::Add => Style::default()
-            .fg(styles::code_add_gutter_fg())
-            .bg(styles::code_add_gutter_bg())
+        DiffLineKind::Add | DiffLineKind::Remove => Style::default()
+            .fg(diff_change_bar_color(kind))
+            .bg(diff_change_bar_color(kind))
             .add_modifier(Modifier::BOLD),
-        DiffLineKind::Remove => Style::default()
-            .fg(styles::code_remove_gutter_fg())
-            .bg(styles::code_remove_gutter_bg())
-            .add_modifier(Modifier::BOLD),
-        DiffLineKind::Context => Style::default().fg(styles::text_muted()),
+        DiffLineKind::Context => Style::default()
+            .fg(styles::surface_raised())
+            .bg(styles::surface_raised()),
     }
+}
+
+fn diff_change_bar_color(kind: DiffLineKind) -> Color {
+    match kind {
+        DiffLineKind::Add => styles::success(),
+        DiffLineKind::Remove => styles::danger(),
+        DiffLineKind::Context => styles::border_muted(),
+    }
+}
+
+fn diff_row_bg(kind: DiffLineKind) -> Color {
+    match kind {
+        DiffLineKind::Add => blend_rgb(diff_change_bar_color(kind), styles::surface(), 42),
+        DiffLineKind::Remove => blend_rgb(diff_change_bar_color(kind), styles::surface(), 42),
+        DiffLineKind::Context => styles::surface(),
+    }
+}
+
+fn blend_rgb(foreground: Color, background: Color, percent: u8) -> Color {
+    let Color::Rgb(fr, fg, fb) = foreground else {
+        return background;
+    };
+    let Color::Rgb(br, bg, bb) = background else {
+        return foreground;
+    };
+    let alpha = u16::from(percent.min(100));
+    let inv = 100_u16.saturating_sub(alpha);
+    Color::Rgb(
+        ((u16::from(fr) * alpha + u16::from(br) * inv) / 100) as u8,
+        ((u16::from(fg) * alpha + u16::from(bg) * inv) / 100) as u8,
+        ((u16::from(fb) * alpha + u16::from(bb) * inv) / 100) as u8,
+    )
 }
 
 fn diff_marker_style(kind: DiffLineKind) -> Style {
     match kind {
-        DiffLineKind::Add => Style::default()
-            .fg(styles::code_add_gutter_fg())
-            .bg(styles::code_add_gutter_bg())
+        DiffLineKind::Add | DiffLineKind::Remove => Style::default()
+            .fg(diff_change_bar_color(kind))
+            .bg(diff_row_bg(kind))
             .add_modifier(Modifier::BOLD),
-        DiffLineKind::Remove => Style::default()
-            .fg(styles::code_remove_gutter_fg())
-            .bg(styles::code_remove_gutter_bg())
-            .add_modifier(Modifier::BOLD),
-        DiffLineKind::Context => Style::default().fg(styles::text_muted()),
+        DiffLineKind::Context => Style::default()
+            .fg(styles::text_muted())
+            .bg(diff_row_bg(kind)),
     }
 }
 
@@ -4051,11 +4410,13 @@ fn diff_content_style(kind: DiffLineKind) -> Style {
     match kind {
         DiffLineKind::Add => Style::default()
             .fg(styles::syntax_string())
-            .bg(styles::code_add_bg()),
+            .bg(diff_row_bg(kind)),
         DiffLineKind::Remove => Style::default()
             .fg(styles::text_primary())
-            .bg(styles::code_remove_bg()),
-        DiffLineKind::Context => Style::default().fg(styles::text_muted()),
+            .bg(diff_row_bg(kind)),
+        DiffLineKind::Context => Style::default()
+            .fg(styles::text_muted())
+            .bg(diff_row_bg(kind)),
     }
 }
 
@@ -4063,11 +4424,13 @@ fn diff_row_style(kind: DiffLineKind) -> Style {
     match kind {
         DiffLineKind::Add => Style::default()
             .fg(styles::syntax_string())
-            .bg(styles::code_add_bg()),
+            .bg(diff_row_bg(kind)),
         DiffLineKind::Remove => Style::default()
             .fg(styles::text_primary())
-            .bg(styles::code_remove_bg()),
-        DiffLineKind::Context => Style::default().fg(styles::text_muted()),
+            .bg(diff_row_bg(kind)),
+        DiffLineKind::Context => Style::default()
+            .fg(styles::text_muted())
+            .bg(diff_row_bg(kind)),
     }
 }
 
@@ -4605,12 +4968,12 @@ mod tests {
     #[test]
     fn review_render_helpers_track_hunk_positions() {
         let file = sample_file();
-        assert_eq!(review_render_line_count(&file), 8);
+        assert_eq!(review_render_line_count(&file), 7);
         assert_eq!(hunk_line_start(&file, 0), 1);
-        assert_eq!(hunk_line_start(&file, 1), 5);
+        assert_eq!(hunk_line_start(&file, 1), 4);
         assert_eq!(hunk_index_for_line(&file, 0), 0);
         assert_eq!(hunk_index_for_line(&file, 2), 0);
-        assert_eq!(hunk_index_for_line(&file, 5), 1);
+        assert_eq!(hunk_index_for_line(&file, 4), 1);
         assert_eq!(hunk_index_for_line(&file, 99), 1);
     }
 
@@ -4626,7 +4989,7 @@ mod tests {
 
         sync_cursor_line_to_hunk(&mut review);
         assert_eq!(review.cursor_hunk, 1);
-        assert_eq!(review.cursor_line, 5);
+        assert_eq!(review.cursor_line, 4);
     }
 
     #[test]
@@ -4654,8 +5017,8 @@ mod tests {
             focus: ReviewFocus::Hunks,
         });
 
-        move_review_cursor_by_line(&mut app, 4);
-        assert_eq!(app.review.cursor_line, 5);
+        move_review_cursor_by_line(&mut app, 3);
+        assert_eq!(app.review.cursor_line, 4);
         assert_eq!(app.review.cursor_hunk, 1);
 
         move_review_cursor_by_line(&mut app, -99);
@@ -4746,11 +5109,11 @@ mod tests {
 
         assert_eq!(
             diff_content_style(DiffLineKind::Add).bg,
-            Some(styles::code_add_bg())
+            Some(diff_row_bg(DiffLineKind::Add))
         );
         assert_eq!(
             diff_content_style(DiffLineKind::Remove).bg,
-            Some(styles::code_remove_bg())
+            Some(diff_row_bg(DiffLineKind::Remove))
         );
         assert_eq!(
             diff_content_style(DiffLineKind::Add).fg,
@@ -4758,29 +5121,131 @@ mod tests {
         );
         assert_eq!(
             diff_marker_style(DiffLineKind::Add).fg,
-            Some(styles::code_add_gutter_fg())
+            Some(diff_change_bar_color(DiffLineKind::Add))
         );
         assert_eq!(
             diff_marker_style(DiffLineKind::Remove).fg,
-            Some(styles::code_remove_gutter_fg())
+            Some(diff_change_bar_color(DiffLineKind::Remove))
         );
         assert_eq!(
             diff_marker_style(DiffLineKind::Add).bg,
-            Some(styles::code_add_gutter_bg())
+            Some(diff_row_bg(DiffLineKind::Add))
         );
         assert_eq!(
             diff_marker_style(DiffLineKind::Remove).bg,
-            Some(styles::code_remove_gutter_bg())
+            Some(diff_row_bg(DiffLineKind::Remove))
         );
         assert_eq!(
             line_number_style(DiffLineKind::Add).bg,
-            Some(styles::code_add_gutter_bg())
+            Some(styles::surface_raised())
         );
         assert_eq!(
             line_number_style(DiffLineKind::Remove).bg,
-            Some(styles::code_remove_gutter_bg())
+            Some(styles::surface_raised())
         );
-        assert_eq!(diff_content_style(DiffLineKind::Context).bg, None);
+        assert_eq!(
+            diff_change_bar_style(DiffLineKind::Add).fg,
+            Some(diff_change_bar_color(DiffLineKind::Add))
+        );
+        assert_eq!(
+            diff_change_bar_style(DiffLineKind::Remove).fg,
+            Some(diff_change_bar_color(DiffLineKind::Remove))
+        );
+        assert_eq!(
+            diff_change_bar_style(DiffLineKind::Add).bg,
+            Some(diff_change_bar_color(DiffLineKind::Add))
+        );
+        assert_eq!(
+            diff_change_bar_style(DiffLineKind::Remove).bg,
+            Some(diff_change_bar_color(DiffLineKind::Remove))
+        );
+        assert_eq!(
+            diff_change_bar_style(DiffLineKind::Context).bg,
+            Some(styles::surface_raised())
+        );
+        assert_eq!(
+            diff_content_style(DiffLineKind::Context).bg,
+            Some(styles::surface())
+        );
+        assert_ne!(diff_row_bg(DiffLineKind::Add), styles::surface());
+        assert_ne!(diff_row_bg(DiffLineKind::Remove), styles::surface());
+        assert_eq!(diff_change_bar(DiffLineKind::Add), "█");
+        assert_eq!(diff_change_bar(DiffLineKind::Remove), "█");
+    }
+
+    #[test]
+    fn unified_diff_rows_color_bar_and_fill_width() {
+        styles::set_palette(Palette::from_theme(ThemePreset::OneDarkPro));
+        let app = sample_app(ReviewUiState {
+            files: vec![sample_file()],
+            cursor_file: 0,
+            cursor_hunk: 0,
+            cursor_line: 0,
+            focus: ReviewFocus::Files,
+        });
+        let file = sample_file();
+        let lines = render_review_unified_lines(&app, &file, 60);
+
+        let removed = &lines[1];
+        let removed_width = spans_width(&removed.spans);
+        assert!(removed_width >= 60);
+        assert_eq!(removed.spans[1].content.as_ref(), "█");
+        assert_eq!(
+            removed.spans[1].style.fg,
+            Some(diff_change_bar_color(DiffLineKind::Remove))
+        );
+        assert_eq!(
+            removed.spans[1].style.bg,
+            Some(diff_change_bar_color(DiffLineKind::Remove))
+        );
+        assert_eq!(
+            removed.spans.last().and_then(|span| span.style.bg),
+            Some(diff_row_bg(DiffLineKind::Remove))
+        );
+        let mut rendered_removed = ratatui_core::buffer::Buffer::empty(Rect::new(0, 0, 80, 1));
+        Paragraph::new(vec![removed.clone()]).render(Rect::new(0, 0, 80, 1), &mut rendered_removed);
+        assert_eq!(rendered_removed[(10, 0)].symbol(), "█");
+        assert_eq!(
+            rendered_removed[(10, 0)].fg,
+            diff_change_bar_color(DiffLineKind::Remove)
+        );
+        assert_eq!(
+            rendered_removed[(10, 0)].bg,
+            diff_change_bar_color(DiffLineKind::Remove)
+        );
+        assert_eq!(
+            rendered_removed[(59, 0)].bg,
+            diff_row_bg(DiffLineKind::Remove)
+        );
+
+        let added = &lines[2];
+        let added_width = spans_width(&added.spans);
+        assert!(added_width >= 60);
+        assert_eq!(added.spans[1].content.as_ref(), "█");
+        assert_eq!(
+            added.spans[1].style.fg,
+            Some(diff_change_bar_color(DiffLineKind::Add))
+        );
+        assert_eq!(
+            added.spans[1].style.bg,
+            Some(diff_change_bar_color(DiffLineKind::Add))
+        );
+        assert_eq!(
+            added.spans.last().and_then(|span| span.style.bg),
+            Some(diff_row_bg(DiffLineKind::Add))
+        );
+        let mut rendered_added = ratatui_core::buffer::Buffer::empty(Rect::new(0, 0, 80, 1));
+        Paragraph::new(vec![added.clone()]).render(Rect::new(0, 0, 80, 1), &mut rendered_added);
+        assert_eq!(rendered_added[(10, 0)].symbol(), "█");
+        assert_eq!(
+            rendered_added[(10, 0)].fg,
+            diff_change_bar_color(DiffLineKind::Add)
+        );
+        assert_eq!(
+            rendered_added[(10, 0)].bg,
+            diff_change_bar_color(DiffLineKind::Add)
+        );
+        assert_eq!(rendered_added[(59, 0)].bg, diff_row_bg(DiffLineKind::Add));
     }
 
     #[test]
