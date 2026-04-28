@@ -25,7 +25,7 @@ pub struct Palette {
 static CURRENT_PALETTE: OnceLock<RwLock<Palette>> = OnceLock::new();
 
 pub fn set_palette(palette: Palette) {
-    let lock = CURRENT_PALETTE.get_or_init(|| RwLock::new(Palette::one_dark_pro()));
+    let lock = CURRENT_PALETTE.get_or_init(|| RwLock::new(Palette::default_theme()));
     if let Ok(mut current) = lock.write() {
         *current = palette;
     }
@@ -33,15 +33,16 @@ pub fn set_palette(palette: Palette) {
 
 pub fn current_palette() -> Palette {
     CURRENT_PALETTE
-        .get_or_init(|| RwLock::new(Palette::one_dark_pro()))
+        .get_or_init(|| RwLock::new(Palette::default_theme()))
         .read()
         .map(|palette| *palette)
-        .unwrap_or_else(|_| Palette::one_dark_pro())
+        .unwrap_or_else(|_| Palette::default_theme())
 }
 
 impl Palette {
     pub fn from_theme(theme: ThemePreset) -> Self {
         match theme {
+            ThemePreset::Default => Self::default_theme(),
             ThemePreset::OneDarkPro => Self::one_dark_pro(),
             ThemePreset::Dracula => Self::dracula(),
             ThemePreset::TokyoNight => Self::tokyo_night(),
@@ -49,7 +50,7 @@ impl Palette {
         }
     }
 
-    pub fn one_dark_pro() -> Self {
+    pub fn default_theme() -> Self {
         Self {
             base_bg: Color::Rgb(0, 0, 0),
             surface: Color::Rgb(10, 8, 18),
@@ -68,60 +69,79 @@ impl Palette {
         }
     }
 
+    pub fn one_dark_pro() -> Self {
+        Self {
+            base_bg: Color::Rgb(40, 44, 52),
+            surface: Color::Rgb(33, 37, 43),
+            surface_raised: Color::Rgb(62, 68, 81),
+            border_muted: Color::Rgb(92, 99, 112),
+            text_primary: Color::Rgb(171, 178, 191),
+            text_muted: Color::Rgb(130, 137, 151),
+            text_subtle: Color::Rgb(92, 99, 112),
+            accent: Color::Rgb(198, 120, 221),
+            accent_bright: Color::Rgb(97, 175, 239),
+            accent_dim: Color::Rgb(62, 68, 81),
+            code_add: Color::Rgb(152, 195, 121),
+            code_remove: Color::Rgb(224, 108, 117),
+            success: Color::Rgb(152, 195, 121),
+            danger: Color::Rgb(224, 108, 117),
+        }
+    }
+
     pub fn dracula() -> Self {
         Self {
-            base_bg: Color::Rgb(8, 8, 13),
-            surface: Color::Rgb(23, 23, 33),
-            surface_raised: Color::Rgb(35, 33, 49),
-            border_muted: Color::Rgb(72, 72, 92),
-            text_primary: Color::Rgb(232, 234, 247),
-            text_muted: Color::Rgb(167, 172, 204),
-            text_subtle: Color::Rgb(113, 118, 149),
-            accent: Color::Rgb(189, 147, 249),
-            accent_bright: Color::Rgb(218, 196, 255),
-            accent_dim: Color::Rgb(78, 62, 108),
-            code_add: Color::Rgb(141, 206, 170),
-            code_remove: Color::Rgb(245, 160, 171),
-            success: Color::Rgb(170, 220, 193),
-            danger: Color::Rgb(222, 152, 173),
+            base_bg: Color::Rgb(40, 42, 54),
+            surface: Color::Rgb(33, 34, 44),
+            surface_raised: Color::Rgb(68, 71, 90),
+            border_muted: Color::Rgb(98, 114, 164),
+            text_primary: Color::Rgb(248, 248, 242),
+            text_muted: Color::Rgb(189, 193, 205),
+            text_subtle: Color::Rgb(98, 114, 164),
+            accent: Color::Rgb(255, 121, 198),
+            accent_bright: Color::Rgb(189, 147, 249),
+            accent_dim: Color::Rgb(68, 71, 90),
+            code_add: Color::Rgb(80, 250, 123),
+            code_remove: Color::Rgb(255, 85, 85),
+            success: Color::Rgb(80, 250, 123),
+            danger: Color::Rgb(255, 85, 85),
         }
     }
 
     pub fn tokyo_night() -> Self {
         Self {
-            base_bg: Color::Rgb(4, 8, 15),
-            surface: Color::Rgb(24, 30, 46),
-            surface_raised: Color::Rgb(34, 41, 65),
-            border_muted: Color::Rgb(70, 83, 117),
-            text_primary: Color::Rgb(199, 206, 255),
-            text_muted: Color::Rgb(154, 168, 206),
-            text_subtle: Color::Rgb(101, 120, 168),
-            accent: Color::Rgb(122, 162, 247),
+            base_bg: Color::Rgb(26, 27, 38),
+            surface: Color::Rgb(22, 22, 31),
+            surface_raised: Color::Rgb(36, 40, 59),
+            border_muted: Color::Rgb(86, 95, 137),
+            text_primary: Color::Rgb(169, 177, 214),
+            text_muted: Color::Rgb(128, 138, 180),
+            text_subtle: Color::Rgb(86, 95, 137),
+            accent: Color::Rgb(187, 154, 247),
             accent_bright: Color::Rgb(167, 197, 255),
-            accent_dim: Color::Rgb(58, 79, 117),
-            code_add: Color::Rgb(157, 216, 174),
-            code_remove: Color::Rgb(231, 154, 165),
-            success: Color::Rgb(161, 205, 229),
-            danger: Color::Rgb(222, 145, 160),
+            accent_dim: Color::Rgb(46, 51, 75),
+            code_add: Color::Rgb(158, 206, 106),
+            code_remove: Color::Rgb(255, 158, 100),
+            success: Color::Rgb(158, 206, 106),
+            danger: Color::Rgb(255, 158, 100),
         }
     }
 
     pub fn night_owl() -> Self {
         Self {
             base_bg: Color::Rgb(1, 4, 10),
-            surface: Color::Rgb(9, 15, 26),
-            surface_raised: Color::Rgb(15, 24, 41),
-            border_muted: Color::Rgb(44, 62, 86),
+            surface: Color::Rgb(3, 23, 40),
+            surface_raised: Color::Rgb(10, 38, 63),
+            border_muted: Color::Rgb(99, 119, 119),
             text_primary: Color::Rgb(214, 225, 237),
-            text_muted: Color::Rgb(144, 169, 196),
-            text_subtle: Color::Rgb(94, 123, 155),
-            accent: Color::Rgb(130, 170, 255),
-            accent_bright: Color::Rgb(179, 208, 255),
-            accent_dim: Color::Rgb(48, 70, 104),
-            code_add: Color::Rgb(146, 209, 183),
-            code_remove: Color::Rgb(247, 139, 144),
-            success: Color::Rgb(152, 210, 191),
-            danger: Color::Rgb(225, 147, 160),
+            text_muted: Color::Rgb(143, 164, 176),
+            text_subtle: Color::Rgb(99, 119, 119),
+            accent: Color::Rgb(199, 146, 234),
+            accent_bright: Color::Rgb(130, 170, 255),
+            accent_dim: Color::Rgb(35, 60, 84),
+            code_add: Color::Rgb(173, 219, 103),
+            code_remove: Color::Rgb(247, 140, 108),
+            success: Color::Rgb(173, 219, 103),
+            danger: Color::Rgb(247, 140, 108),
         }
     }
 }
@@ -224,11 +244,13 @@ mod tests {
 
     #[test]
     fn palette_from_theme_selects_each_theme() {
+        let default = Palette::from_theme(ThemePreset::Default);
         let one_dark = Palette::from_theme(ThemePreset::OneDarkPro);
         let dracula = Palette::from_theme(ThemePreset::Dracula);
         let tokyo = Palette::from_theme(ThemePreset::TokyoNight);
         let night = Palette::from_theme(ThemePreset::NightOwl);
 
+        assert_ne!(default.base_bg, one_dark.base_bg);
         assert_ne!(one_dark.accent, dracula.accent);
         assert_ne!(dracula.accent, tokyo.accent);
         assert_ne!(tokyo.accent, night.accent);
@@ -290,10 +312,16 @@ mod tests {
     fn code_diff_colors_preserve_readability_by_theme() {
         let one_dark = Palette::from_theme(ThemePreset::OneDarkPro);
         let dracula = Palette::from_theme(ThemePreset::Dracula);
+        let tokyo = Palette::from_theme(ThemePreset::TokyoNight);
+        let night_owl = Palette::from_theme(ThemePreset::NightOwl);
 
-        assert_eq!(one_dark.code_add, Color::Rgb(154, 199, 165));
-        assert_eq!(one_dark.code_remove, Color::Rgb(209, 148, 166));
-        assert_eq!(dracula.code_add, Color::Rgb(141, 206, 170));
-        assert_eq!(dracula.code_remove, Color::Rgb(245, 160, 171));
+        assert_eq!(one_dark.code_add, Color::Rgb(152, 195, 121));
+        assert_eq!(one_dark.code_remove, Color::Rgb(224, 108, 117));
+        assert_eq!(dracula.code_add, Color::Rgb(80, 250, 123));
+        assert_eq!(dracula.code_remove, Color::Rgb(255, 85, 85));
+        assert_eq!(tokyo.code_add, Color::Rgb(158, 206, 106));
+        assert_eq!(tokyo.code_remove, Color::Rgb(255, 158, 100));
+        assert_eq!(night_owl.code_add, Color::Rgb(173, 219, 103));
+        assert_eq!(night_owl.code_remove, Color::Rgb(247, 140, 108));
     }
 }

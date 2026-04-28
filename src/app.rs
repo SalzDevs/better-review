@@ -4660,7 +4660,7 @@ mod tests {
 
         assert!(text.contains("Default model"));
         assert!(text.contains("Theme"));
-        assert!(text.contains("One Dark Pro"));
+        assert!(text.contains("Default"));
         assert!(text.contains("GitHub token"));
         assert!(text.contains("Keybindings"));
         assert!(!text.contains("Press Enter"));

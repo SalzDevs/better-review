@@ -33,6 +33,7 @@ impl Default for AppSettings {
 #[serde(rename_all = "snake_case")]
 pub enum ThemePreset {
     #[default]
+    Default,
     OneDarkPro,
     Dracula,
     TokyoNight,
@@ -46,7 +47,8 @@ impl std::fmt::Display for ThemePreset {
 }
 
 impl ThemePreset {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
+        Self::Default,
         Self::OneDarkPro,
         Self::Dracula,
         Self::TokyoNight,
@@ -55,6 +57,7 @@ impl ThemePreset {
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::Default => "Default",
             Self::OneDarkPro => "One Dark Pro",
             Self::Dracula => "Dracula",
             Self::TokyoNight => "Tokyo Night",

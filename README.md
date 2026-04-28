@@ -137,6 +137,7 @@ Press `s` to open Settings. From there you can choose a UI theme, set the persis
 
 Available themes:
 
+- Default
 - One Dark Pro
 - Dracula
 - Tokyo Night
