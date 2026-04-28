@@ -2034,7 +2034,9 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     let mut diff_lines = vec![Line::from(vec![
         Span::styled(
             app.review.files[app.review.cursor_file].display_path(),
-            styles::title(),
+            Style::default()
+                .fg(styles::syntax_variable())
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
         Span::styled(
@@ -2042,7 +2044,7 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                 ReviewFocus::Files => "reviewing files",
                 ReviewFocus::Hunks => "inspecting hunks",
             },
-            styles::soft_accent(),
+            Style::default().fg(styles::syntax_keyword()),
         ),
     ])];
     if let Some(file) = app.review.files.get(app.review.cursor_file) {
@@ -2052,11 +2054,11 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             let is_current_line = app.review.focus == ReviewFocus::Hunks
                 && app.review.cursor_line == diff_lines.len();
             let mut style = Style::default()
-                .fg(styles::text_primary())
+                .fg(styles::syntax_function())
                 .bg(styles::surface_raised());
             if is_current_hunk {
                 style = Style::default()
-                    .fg(styles::text_primary())
+                    .fg(styles::syntax_function())
                     .bg(styles::accent_dim())
                     .add_modifier(Modifier::BOLD);
             }
@@ -2065,12 +2067,18 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             }
 
             let status = match hunk.review_status {
-                ReviewStatus::Accepted => {
-                    Span::styled(" [accepted]", Style::default().fg(styles::code_add()))
-                }
-                ReviewStatus::Rejected => {
-                    Span::styled(" [rejected]", Style::default().fg(styles::code_remove()))
-                }
+                ReviewStatus::Accepted => Span::styled(
+                    " [accepted]",
+                    Style::default()
+                        .fg(styles::text_primary())
+                        .bg(styles::code_add_bg()),
+                ),
+                ReviewStatus::Rejected => Span::styled(
+                    " [rejected]",
+                    Style::default()
+                        .fg(styles::text_primary())
+                        .bg(styles::code_remove_bg()),
+                ),
                 ReviewStatus::Unreviewed => Span::styled(" [unreviewed]", styles::muted()),
             };
 
@@ -2093,17 +2101,10 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                     DiffLineKind::Remove => "-",
                     DiffLineKind::Context => " ",
                 };
-                let style = match line.kind {
-                    DiffLineKind::Add => Style::default().fg(styles::code_add()),
-                    DiffLineKind::Remove => Style::default().fg(styles::code_remove()),
-                    DiffLineKind::Context => Style::default().fg(styles::text_muted()),
-                };
-                let style = if is_current_line {
-                    style
-                        .bg(styles::surface_raised())
-                        .add_modifier(Modifier::UNDERLINED)
+                let modifier = if is_current_line {
+                    Modifier::UNDERLINED
                 } else {
-                    style
+                    Modifier::empty()
                 };
                 let old = line
                     .old_line
@@ -2114,9 +2115,15 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                     .map(|n| format!("{n:>4}"))
                     .unwrap_or_else(|| "    ".to_string());
                 diff_lines.push(Line::from(vec![
-                    Span::styled(format!("{old} {new} "), styles::subtle()),
-                    Span::styled(prefix, style),
-                    Span::styled(line.content.clone(), style),
+                    Span::styled(
+                        format!("{old} {new} "),
+                        line_number_style(line.kind).add_modifier(modifier),
+                    ),
+                    Span::styled(prefix, diff_marker_style(line.kind).add_modifier(modifier)),
+                    Span::styled(
+                        line.content.clone(),
+                        diff_content_style(line.kind).add_modifier(modifier),
+                    ),
                 ]));
             }
             diff_lines.push(Line::from(Span::raw("")));
@@ -3757,6 +3764,44 @@ fn move_review_cursor_by_line(app: &mut App, delta: isize) {
     }
 }
 
+fn line_number_style(kind: DiffLineKind) -> Style {
+    match kind {
+        DiffLineKind::Add => Style::default()
+            .fg(styles::syntax_comment())
+            .bg(styles::code_add_bg()),
+        DiffLineKind::Remove => Style::default()
+            .fg(styles::syntax_comment())
+            .bg(styles::code_remove_bg()),
+        DiffLineKind::Context => styles::subtle(),
+    }
+}
+
+fn diff_marker_style(kind: DiffLineKind) -> Style {
+    match kind {
+        DiffLineKind::Add => Style::default()
+            .fg(styles::code_add())
+            .bg(styles::code_add_bg())
+            .add_modifier(Modifier::BOLD),
+        DiffLineKind::Remove => Style::default()
+            .fg(styles::code_remove())
+            .bg(styles::code_remove_bg())
+            .add_modifier(Modifier::BOLD),
+        DiffLineKind::Context => Style::default().fg(styles::text_muted()),
+    }
+}
+
+fn diff_content_style(kind: DiffLineKind) -> Style {
+    match kind {
+        DiffLineKind::Add => Style::default()
+            .fg(styles::syntax_string())
+            .bg(styles::code_add_bg()),
+        DiffLineKind::Remove => Style::default()
+            .fg(styles::text_primary())
+            .bg(styles::code_remove_bg()),
+        DiffLineKind::Context => Style::default().fg(styles::text_muted()),
+    }
+}
+
 fn explain_context_source_line(app: &App) -> String {
     app.active_session()
         .map(|session| format!("context: {} ({})", session.title, session.id))
@@ -4427,6 +4472,25 @@ mod tests {
     }
 
     #[test]
+    fn diff_line_styles_use_marked_backgrounds() {
+        styles::set_palette(Palette::from_theme(ThemePreset::OneDarkPro));
+
+        assert_eq!(
+            diff_content_style(DiffLineKind::Add).bg,
+            Some(styles::code_add_bg())
+        );
+        assert_eq!(
+            diff_content_style(DiffLineKind::Remove).bg,
+            Some(styles::code_remove_bg())
+        );
+        assert_eq!(
+            diff_content_style(DiffLineKind::Add).fg,
+            Some(styles::syntax_string())
+        );
+        assert_eq!(diff_content_style(DiffLineKind::Context).bg, None);
+    }
+
+    #[test]
     fn to_textarea_input_maps_keys_and_modifiers() {
         let mapped = to_textarea_input(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
         assert!(mapped.ctrl);
@@ -4546,6 +4610,7 @@ mod tests {
 
     #[test]
     fn render_why_answer_lines_styles_named_sections() {
+        styles::set_palette(Palette::from_theme(ThemePreset::Default));
         let lines = render_why_answer_lines(&WhyAnswer {
             summary: "explain".to_string(),
             purpose: "make the diff understandable".to_string(),

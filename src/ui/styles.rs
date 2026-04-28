@@ -16,8 +16,15 @@ pub struct Palette {
     pub accent: Color,
     pub accent_bright: Color,
     pub accent_dim: Color,
+    pub syntax_keyword: Color,
+    pub syntax_function: Color,
+    pub syntax_string: Color,
+    pub syntax_variable: Color,
+    pub syntax_comment: Color,
     pub code_add: Color,
     pub code_remove: Color,
+    pub code_add_bg: Color,
+    pub code_remove_bg: Color,
     pub success: Color,
     pub danger: Color,
 }
@@ -62,8 +69,15 @@ impl Palette {
             accent: Color::Rgb(105, 48, 199),
             accent_bright: Color::Rgb(221, 181, 248),
             accent_dim: Color::Rgb(58, 47, 102),
+            syntax_keyword: Color::Rgb(221, 181, 248),
+            syntax_function: Color::Rgb(154, 199, 238),
+            syntax_string: Color::Rgb(154, 199, 165),
+            syntax_variable: Color::Rgb(205, 205, 205),
+            syntax_comment: Color::Rgb(85, 85, 85),
             code_add: Color::Rgb(154, 199, 165),
             code_remove: Color::Rgb(209, 148, 166),
+            code_add_bg: Color::Rgb(22, 43, 31),
+            code_remove_bg: Color::Rgb(48, 24, 35),
             success: Color::Rgb(184, 184, 184),
             danger: Color::Rgb(147, 147, 147),
         }
@@ -81,8 +95,15 @@ impl Palette {
             accent: Color::Rgb(198, 120, 221),
             accent_bright: Color::Rgb(97, 175, 239),
             accent_dim: Color::Rgb(62, 68, 81),
+            syntax_keyword: Color::Rgb(198, 120, 221),
+            syntax_function: Color::Rgb(97, 175, 239),
+            syntax_string: Color::Rgb(152, 195, 121),
+            syntax_variable: Color::Rgb(224, 108, 117),
+            syntax_comment: Color::Rgb(92, 99, 112),
             code_add: Color::Rgb(152, 195, 121),
             code_remove: Color::Rgb(224, 108, 117),
+            code_add_bg: Color::Rgb(42, 58, 43),
+            code_remove_bg: Color::Rgb(68, 45, 52),
             success: Color::Rgb(152, 195, 121),
             danger: Color::Rgb(224, 108, 117),
         }
@@ -100,8 +121,15 @@ impl Palette {
             accent: Color::Rgb(255, 121, 198),
             accent_bright: Color::Rgb(189, 147, 249),
             accent_dim: Color::Rgb(68, 71, 90),
+            syntax_keyword: Color::Rgb(255, 121, 198),
+            syntax_function: Color::Rgb(80, 250, 123),
+            syntax_string: Color::Rgb(241, 250, 140),
+            syntax_variable: Color::Rgb(248, 248, 242),
+            syntax_comment: Color::Rgb(98, 114, 164),
             code_add: Color::Rgb(80, 250, 123),
             code_remove: Color::Rgb(255, 85, 85),
+            code_add_bg: Color::Rgb(38, 78, 58),
+            code_remove_bg: Color::Rgb(81, 42, 55),
             success: Color::Rgb(80, 250, 123),
             danger: Color::Rgb(255, 85, 85),
         }
@@ -119,8 +147,15 @@ impl Palette {
             accent: Color::Rgb(187, 154, 247),
             accent_bright: Color::Rgb(167, 197, 255),
             accent_dim: Color::Rgb(46, 51, 75),
+            syntax_keyword: Color::Rgb(187, 154, 247),
+            syntax_function: Color::Rgb(122, 162, 247),
+            syntax_string: Color::Rgb(158, 206, 106),
+            syntax_variable: Color::Rgb(224, 175, 104),
+            syntax_comment: Color::Rgb(86, 95, 137),
             code_add: Color::Rgb(158, 206, 106),
             code_remove: Color::Rgb(255, 158, 100),
+            code_add_bg: Color::Rgb(40, 66, 49),
+            code_remove_bg: Color::Rgb(72, 48, 42),
             success: Color::Rgb(158, 206, 106),
             danger: Color::Rgb(255, 158, 100),
         }
@@ -138,8 +173,15 @@ impl Palette {
             accent: Color::Rgb(199, 146, 234),
             accent_bright: Color::Rgb(130, 170, 255),
             accent_dim: Color::Rgb(35, 60, 84),
+            syntax_keyword: Color::Rgb(199, 146, 234),
+            syntax_function: Color::Rgb(130, 170, 255),
+            syntax_string: Color::Rgb(173, 219, 103),
+            syntax_variable: Color::Rgb(214, 225, 237),
+            syntax_comment: Color::Rgb(99, 119, 119),
             code_add: Color::Rgb(173, 219, 103),
             code_remove: Color::Rgb(247, 140, 108),
+            code_add_bg: Color::Rgb(23, 66, 53),
+            code_remove_bg: Color::Rgb(70, 45, 50),
             success: Color::Rgb(173, 219, 103),
             danger: Color::Rgb(247, 140, 108),
         }
@@ -224,6 +266,34 @@ pub fn code_add() -> Color {
 
 pub fn code_remove() -> Color {
     current_palette().code_remove
+}
+
+pub fn code_add_bg() -> Color {
+    current_palette().code_add_bg
+}
+
+pub fn code_remove_bg() -> Color {
+    current_palette().code_remove_bg
+}
+
+pub fn syntax_keyword() -> Color {
+    current_palette().syntax_keyword
+}
+
+pub fn syntax_function() -> Color {
+    current_palette().syntax_function
+}
+
+pub fn syntax_string() -> Color {
+    current_palette().syntax_string
+}
+
+pub fn syntax_variable() -> Color {
+    current_palette().syntax_variable
+}
+
+pub fn syntax_comment() -> Color {
+    current_palette().syntax_comment
 }
 
 pub fn success() -> Color {
@@ -323,5 +393,31 @@ mod tests {
         assert_eq!(tokyo.code_remove, Color::Rgb(255, 158, 100));
         assert_eq!(night_owl.code_add, Color::Rgb(173, 219, 103));
         assert_eq!(night_owl.code_remove, Color::Rgb(247, 140, 108));
+    }
+
+    #[test]
+    fn marked_diff_backgrounds_are_theme_specific() {
+        let default = Palette::from_theme(ThemePreset::Default);
+        let one_dark = Palette::from_theme(ThemePreset::OneDarkPro);
+        let dracula = Palette::from_theme(ThemePreset::Dracula);
+
+        assert_ne!(default.code_add_bg, one_dark.code_add_bg);
+        assert_ne!(one_dark.code_add_bg, dracula.code_add_bg);
+        assert_ne!(dracula.code_add_bg, dracula.code_remove_bg);
+    }
+
+    #[test]
+    fn syntax_palette_matches_theme_specs() {
+        let one_dark = Palette::from_theme(ThemePreset::OneDarkPro);
+        let dracula = Palette::from_theme(ThemePreset::Dracula);
+        let tokyo = Palette::from_theme(ThemePreset::TokyoNight);
+        let night_owl = Palette::from_theme(ThemePreset::NightOwl);
+
+        assert_eq!(one_dark.syntax_keyword, Color::Rgb(198, 120, 221));
+        assert_eq!(one_dark.syntax_function, Color::Rgb(97, 175, 239));
+        assert_eq!(dracula.syntax_keyword, Color::Rgb(255, 121, 198));
+        assert_eq!(dracula.syntax_string, Color::Rgb(241, 250, 140));
+        assert_eq!(tokyo.syntax_variable, Color::Rgb(224, 175, 104));
+        assert_eq!(night_owl.syntax_comment, Color::Rgb(99, 119, 119));
     }
 }
