@@ -15,14 +15,14 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
-use ratatui_core::style::{Modifier, Style};
+use ratatui_core::style::{Color, Modifier, Style};
 use ratatui_core::widgets::Widget;
 use ratatui_interact::components::{AnimatedText, AnimatedTextState, AnimatedTextStyle};
 use ratatui_textarea::{TextArea, WrapMode};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::domain::diff::{DiffLineKind, FileDiff, ReviewStatus};
+use crate::domain::diff::{DiffLineKind, FileDiff, FileStatus, ReviewStatus};
 use crate::services::git::{GitService, PushFailure};
 use crate::services::opencode::{
     OpencodeService, OpencodeSession, WhyAnswer, WhyRiskLevel, WhyTarget, why_target_for_file,
@@ -1983,13 +1983,18 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     let sections = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(28),
+            Constraint::Length(36),
             Constraint::Min(30),
             Constraint::Length(34),
         ])
         .split(content);
 
     let counts = app.review_counts();
+    let sidebar_title_style = if app.review.focus == ReviewFocus::Files {
+        styles::accent_bold()
+    } else {
+        styles::title()
+    };
 
     let items = app
         .review
@@ -1997,39 +2002,89 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         .iter()
         .enumerate()
         .map(|(index, file)| {
-            let style = if index == app.review.cursor_file {
+            let selected = index == app.review.cursor_file;
+            let row_bg = if selected {
+                styles::accent_dim()
+            } else {
+                styles::surface()
+            };
+            let row_style = if selected {
                 Style::default()
                     .fg(styles::text_primary())
-                    .bg(styles::accent_dim())
+                    .bg(row_bg)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(styles::text_muted())
+                Style::default().fg(styles::text_muted()).bg(row_bg)
             };
+
             let marker = review_marker(file.review_status.clone(), file.status, false);
+            let cursor = if selected { "▸" } else { " " };
+            let (tree_prefix, parent, leaf) = tree_sidebar_parts(file.display_path());
+
+            let (status_icon, status_style) = match file.status {
+                FileStatus::Added => (
+                    "✚",
+                    Style::default()
+                        .fg(styles::code_add_gutter_fg())
+                        .bg(row_bg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                FileStatus::Deleted => (
+                    "✖",
+                    Style::default()
+                        .fg(styles::code_remove_gutter_fg())
+                        .bg(row_bg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                FileStatus::Modified => (
+                    "●",
+                    Style::default()
+                        .fg(styles::accent_bright_color())
+                        .bg(row_bg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            };
+
+            let branch_style = styles::subtle().bg(row_bg);
+            let parent_style = Style::default().fg(styles::syntax_comment()).bg(row_bg);
+
             ListItem::new(Line::from(vec![
-                Span::styled(format!(" {marker} "), style),
-                Span::styled(truncate_path(file.display_path(), 28), style),
+                Span::styled(format!("{cursor} {marker} "), row_style),
+                Span::styled(format!("{status_icon} "), status_style),
+                Span::styled(tree_prefix, branch_style),
+                Span::styled(parent, parent_style),
+                Span::styled(truncate_path(&leaf, 24), row_style),
             ]))
         })
         .collect::<Vec<_>>();
 
-    let sidebar = List::new(items).block(
-        Block::default()
-            .title(format!(
-                "Files  {} unreviewed  {} accepted  {} rejected",
-                counts.unreviewed, counts.accepted, counts.rejected
-            ))
-            .borders(Borders::RIGHT)
-            .border_style(
-                Style::default().fg(if app.review.focus == ReviewFocus::Files {
-                    styles::accent_bright_color()
-                } else {
-                    styles::border_muted()
-                }),
-            ),
-    );
     let mut sidebar_state = ListState::default().with_selected(Some(app.review.cursor_file));
-    frame.render_stateful_widget(sidebar, sections[0], &mut sidebar_state);
+    frame.render_stateful_widget(
+        List::new(items).block(
+            Block::default()
+                .title(Line::from(vec![
+                    Span::styled("[1] ", sidebar_title_style),
+                    Span::styled("Files", styles::title()),
+                    Span::styled(
+                        format!(
+                            "  {} pending  {} accepted  {} rejected",
+                            counts.unreviewed, counts.accepted, counts.rejected
+                        ),
+                        styles::subtle(),
+                    ),
+                ]))
+                .borders(Borders::RIGHT)
+                .border_style(
+                    Style::default().fg(if app.review.focus == ReviewFocus::Files {
+                        styles::accent_bright_color()
+                    } else {
+                        styles::border_muted()
+                    }),
+                ),
+        ),
+        sections[0],
+        &mut sidebar_state,
+    );
 
     let mut diff_lines = vec![Line::from(vec![
         Span::styled(
@@ -2047,6 +2102,7 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             Style::default().fg(styles::syntax_keyword()),
         ),
     ])];
+
     if let Some(file) = app.review.files.get(app.review.cursor_file) {
         for (index, hunk) in file.hunks.iter().enumerate() {
             let is_current_hunk =
@@ -2057,10 +2113,7 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                 .fg(styles::syntax_function())
                 .bg(styles::surface_raised());
             if is_current_hunk {
-                style = Style::default()
-                    .fg(styles::syntax_function())
-                    .bg(styles::accent_dim())
-                    .add_modifier(Modifier::BOLD);
+                style = style.bg(styles::accent_dim()).add_modifier(Modifier::BOLD);
             }
             if is_current_line {
                 style = style.add_modifier(Modifier::UNDERLINED);
@@ -2093,6 +2146,7 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                 ),
                 status,
             ]));
+
             for line in &hunk.lines {
                 let is_current_line = app.review.focus == ReviewFocus::Hunks
                     && app.review.cursor_line == diff_lines.len();
@@ -2114,18 +2168,22 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                     .new_line
                     .map(|n| format!("{n:>4}"))
                     .unwrap_or_else(|| "    ".to_string());
-                diff_lines.push(Line::from(vec![
+                let line_style = diff_row_style(line.kind).add_modifier(modifier);
+
+                let mut spans = vec![
                     Span::styled(
                         format!("{old} {new} "),
                         line_number_style(line.kind).add_modifier(modifier),
                     ),
                     Span::styled(prefix, diff_marker_style(line.kind).add_modifier(modifier)),
-                    Span::styled(" ", diff_content_style(line.kind).add_modifier(modifier)),
-                    Span::styled(
-                        line.content.clone(),
-                        diff_content_style(line.kind).add_modifier(modifier),
-                    ),
-                ]));
+                    Span::styled(" ", line_style),
+                ];
+                spans.extend(syntax_highlight_diff_content(
+                    &line.content,
+                    line.kind,
+                    modifier,
+                ));
+                diff_lines.push(Line::from(spans));
             }
             diff_lines.push(Line::from(Span::raw("")));
         }
@@ -2148,6 +2206,182 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             .wrap(Wrap { trim: true }),
         sections[2],
     );
+}
+
+fn tree_sidebar_parts(path: &str) -> (String, String, String) {
+    let mut parts = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+
+    if parts.is_empty() {
+        return ("• ".to_string(), String::new(), path.to_string());
+    }
+
+    let leaf = parts.pop().unwrap_or_default().to_string();
+    let depth = parts.len();
+    let tree_prefix = if depth == 0 {
+        "• ".to_string()
+    } else {
+        format!("{}└─ ", "  ".repeat(depth.saturating_sub(1)))
+    };
+    let parent = if parts.is_empty() {
+        String::new()
+    } else {
+        format!("{}/", parts.join("/"))
+    };
+
+    (tree_prefix, parent, leaf)
+}
+
+const DIFF_SYNTAX_KEYWORDS: &[&str] = &[
+    "as", "async", "await", "break", "const", "continue", "else", "enum", "extern", "fn", "for",
+    "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "return", "self",
+    "Self", "static", "struct", "trait", "type", "use", "where", "while",
+];
+
+fn syntax_highlight_diff_content(
+    content: &str,
+    kind: DiffLineKind,
+    modifier: Modifier,
+) -> Vec<Span<'static>> {
+    let base_style = diff_content_style(kind).add_modifier(modifier);
+    if content.is_empty() {
+        return vec![Span::styled(String::new(), base_style)];
+    }
+
+    let chars = content.chars().collect::<Vec<_>>();
+    let mut spans = Vec::new();
+    let mut index = 0;
+
+    while index < chars.len() {
+        if chars[index] == '/' && chars.get(index + 1) == Some(&'/') {
+            let comment = chars[index..].iter().collect::<String>();
+            spans.push(Span::styled(
+                comment,
+                syntax_tint(base_style, styles::syntax_comment()),
+            ));
+            break;
+        }
+
+        let current = chars[index];
+
+        if matches!(current, '"' | '\'' | '`') {
+            let quote = current;
+            let start = index;
+            index += 1;
+            while index < chars.len() {
+                if chars[index] == '\\' {
+                    index = (index + 2).min(chars.len());
+                    continue;
+                }
+                if chars[index] == quote {
+                    index += 1;
+                    break;
+                }
+                index += 1;
+            }
+            spans.push(Span::styled(
+                chars[start..index].iter().collect::<String>(),
+                syntax_tint(base_style, styles::syntax_string()),
+            ));
+            continue;
+        }
+
+        if current.is_ascii_digit() {
+            let start = index;
+            index += 1;
+            while index < chars.len()
+                && (chars[index].is_ascii_alphanumeric() || matches!(chars[index], '_' | '.'))
+            {
+                index += 1;
+            }
+            spans.push(Span::styled(
+                chars[start..index].iter().collect::<String>(),
+                syntax_tint(base_style, styles::accent_bright_color()),
+            ));
+            continue;
+        }
+
+        if is_identifier_start(current) {
+            let start = index;
+            index += 1;
+            while index < chars.len() && is_identifier_continue(chars[index]) {
+                index += 1;
+            }
+
+            let token = chars[start..index].iter().collect::<String>();
+            let next_char = next_non_whitespace_char(&chars, index);
+            let style = if DIFF_SYNTAX_KEYWORDS.contains(&token.as_str()) {
+                syntax_tint(base_style, styles::syntax_keyword())
+            } else if next_char == Some('(') {
+                syntax_tint(base_style, styles::syntax_function())
+            } else if token
+                .chars()
+                .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
+                && token.len() > 1
+            {
+                syntax_tint(base_style, styles::accent_bright_color())
+            } else {
+                base_style
+            };
+
+            spans.push(Span::styled(token, style));
+            continue;
+        }
+
+        let start = index;
+        index += 1;
+        while index < chars.len() {
+            let ch = chars[index];
+            let starts_comment = ch == '/' && chars.get(index + 1) == Some(&'/');
+            if starts_comment
+                || matches!(ch, '"' | '\'' | '`')
+                || ch.is_ascii_digit()
+                || is_identifier_start(ch)
+            {
+                break;
+            }
+            index += 1;
+        }
+
+        spans.push(Span::styled(
+            chars[start..index].iter().collect::<String>(),
+            base_style,
+        ));
+    }
+
+    if spans.is_empty() {
+        spans.push(Span::styled(content.to_string(), base_style));
+    }
+
+    spans
+}
+
+fn syntax_tint(base: Style, fg: Color) -> Style {
+    let mut style = Style::default().fg(fg).add_modifier(base.add_modifier);
+    if let Some(bg) = base.bg {
+        style = style.bg(bg);
+    }
+    style
+}
+
+fn is_identifier_start(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphabetic()
+}
+
+fn is_identifier_continue(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
+}
+
+fn next_non_whitespace_char(chars: &[char], mut index: usize) -> Option<char> {
+    while index < chars.len() {
+        if !chars[index].is_whitespace() {
+            return Some(chars[index]);
+        }
+        index += 1;
+    }
+    None
 }
 
 fn draw_session_picker(frame: &mut ratatui::Frame, area: Rect, app: &App) {
@@ -3792,6 +4026,18 @@ fn diff_marker_style(kind: DiffLineKind) -> Style {
 }
 
 fn diff_content_style(kind: DiffLineKind) -> Style {
+    match kind {
+        DiffLineKind::Add => Style::default()
+            .fg(styles::syntax_string())
+            .bg(styles::code_add_bg()),
+        DiffLineKind::Remove => Style::default()
+            .fg(styles::text_primary())
+            .bg(styles::code_remove_bg()),
+        DiffLineKind::Context => Style::default().fg(styles::text_muted()),
+    }
+}
+
+fn diff_row_style(kind: DiffLineKind) -> Style {
     match kind {
         DiffLineKind::Add => Style::default()
             .fg(styles::syntax_string())
