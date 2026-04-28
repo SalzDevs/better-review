@@ -2097,9 +2097,9 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                 let is_current_line = app.review.focus == ReviewFocus::Hunks
                     && app.review.cursor_line == diff_lines.len();
                 let prefix = match line.kind {
-                    DiffLineKind::Add => "+",
-                    DiffLineKind::Remove => "-",
-                    DiffLineKind::Context => " ",
+                    DiffLineKind::Add => "▌+",
+                    DiffLineKind::Remove => "▌-",
+                    DiffLineKind::Context => "  ",
                 };
                 let modifier = if is_current_line {
                     Modifier::UNDERLINED
@@ -2120,6 +2120,7 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                         line_number_style(line.kind).add_modifier(modifier),
                     ),
                     Span::styled(prefix, diff_marker_style(line.kind).add_modifier(modifier)),
+                    Span::styled(" ", diff_content_style(line.kind).add_modifier(modifier)),
                     Span::styled(
                         line.content.clone(),
                         diff_content_style(line.kind).add_modifier(modifier),
@@ -3796,7 +3797,7 @@ fn diff_content_style(kind: DiffLineKind) -> Style {
             .fg(styles::syntax_string())
             .bg(styles::code_add_bg()),
         DiffLineKind::Remove => Style::default()
-            .fg(styles::code_remove())
+            .fg(styles::text_primary())
             .bg(styles::code_remove_bg()),
         DiffLineKind::Context => Style::default().fg(styles::text_muted()),
     }
@@ -4486,6 +4487,14 @@ mod tests {
         assert_eq!(
             diff_content_style(DiffLineKind::Add).fg,
             Some(styles::syntax_string())
+        );
+        assert_eq!(
+            diff_marker_style(DiffLineKind::Add).fg,
+            Some(styles::code_add())
+        );
+        assert_eq!(
+            diff_marker_style(DiffLineKind::Remove).fg,
+            Some(styles::code_remove())
         );
         assert_eq!(diff_content_style(DiffLineKind::Context).bg, None);
     }
