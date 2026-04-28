@@ -28,8 +28,8 @@ use crate::services::opencode::{
     OpencodeService, OpencodeSession, WhyAnswer, WhyRiskLevel, WhyTarget, why_target_for_file,
     why_target_for_hunk,
 };
-use crate::settings::{AppSettings, KeybindingsSettings, SettingsStore};
-use crate::ui::styles;
+use crate::settings::{AppSettings, KeybindingsSettings, SettingsStore, ThemePreset};
+use crate::ui::styles::{self, Palette};
 
 pub async fn run() -> Result<()> {
     enable_raw_mode()?;
@@ -62,7 +62,9 @@ struct App {
     opencode: Option<OpencodeService>,
     settings: AppSettings,
     settings_store: SettingsStore,
+    palette: Palette,
     settings_cursor: usize,
+    theme_cursor: usize,
     github_token_input: TextArea<'static>,
     keybinding_cursor: usize,
     keybinding_capture: Option<KeybindingCommand>,
@@ -89,6 +91,7 @@ enum Overlay {
     GitHubTokenPrompt,
     PublishPrompt,
     Settings,
+    ThemePicker,
     SettingsModelPicker,
     KeybindingPicker,
     ExplainMenu,
@@ -214,7 +217,9 @@ impl App {
             opencode,
             settings,
             settings_store,
+            palette: Palette::from_theme(ThemePreset::default()),
             settings_cursor: 0,
+            theme_cursor: 0,
             github_token_input: new_github_token_input(),
             keybinding_cursor: 0,
             keybinding_capture: None,
@@ -249,6 +254,9 @@ impl App {
     }
 
     fn apply_saved_settings(&mut self) {
+        self.palette = Palette::from_theme(self.settings.theme);
+        styles::set_palette(self.palette);
+        self.theme_cursor = theme_picker_cursor(self.settings.theme);
         self.saved_model_cursor = saved_model_picker_cursor(
             self.settings.explain.default_model.as_deref(),
             &self.why_this.model.available,
@@ -336,12 +344,14 @@ enum HomeState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SettingsRow {
+    Theme,
     DefaultExplainModel,
     GitHubToken,
     Keybindings,
 }
 
 const SETTINGS_ROWS: &[SettingsRow] = &[
+    SettingsRow::Theme,
     SettingsRow::DefaultExplainModel,
     SettingsRow::GitHubToken,
     SettingsRow::Keybindings,
@@ -681,6 +691,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                 Overlay::GitHubTokenPrompt => handle_github_token_prompt_key(&mut app, key),
                 Overlay::PublishPrompt => handle_publish_prompt_key(&mut app, key),
                 Overlay::Settings => handle_settings_key(&mut app, key),
+                Overlay::ThemePicker => handle_theme_picker_key(&mut app, key),
                 Overlay::SettingsModelPicker => handle_saved_model_picker_key(&mut app, key),
                 Overlay::KeybindingPicker => handle_keybinding_picker_key(&mut app, key),
                 Overlay::ExplainMenu => handle_explain_menu_key(&mut app, key).await?,
@@ -1129,6 +1140,38 @@ fn handle_settings_key(app: &mut App, key: KeyEvent) {
     }
 }
 
+fn handle_theme_picker_key(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => {
+            app.overlay = Overlay::Settings;
+            app.status = "Back to settings.".to_string();
+        }
+        KeyCode::Up => {
+            app.theme_cursor = app.theme_cursor.saturating_sub(1);
+        }
+        _ if key_matches(app, key, KeybindingCommand::MoveUp) => {
+            app.theme_cursor = app.theme_cursor.saturating_sub(1);
+        }
+        KeyCode::Down if app.theme_cursor + 1 < ThemePreset::ALL.len() => {
+            app.theme_cursor += 1;
+        }
+        _ if key_matches(app, key, KeybindingCommand::MoveDown)
+            && app.theme_cursor + 1 < ThemePreset::ALL.len() =>
+        {
+            app.theme_cursor += 1;
+        }
+        KeyCode::Enter => {
+            let theme = selected_theme(app);
+            app.settings.theme = theme;
+            app.palette = Palette::from_theme(theme);
+            save_settings(app);
+            app.overlay = Overlay::Settings;
+            app.status = format!("Theme set to {}.", theme.label());
+        }
+        _ => {}
+    }
+}
+
 fn handle_github_token_prompt_key(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => {
@@ -1261,10 +1304,17 @@ fn handle_keybinding_picker_key(app: &mut App, key: KeyEvent) {
 
 fn open_selected_settings_row(app: &mut App) {
     match SETTINGS_ROWS[app.settings_cursor.min(SETTINGS_ROWS.len() - 1)] {
+        SettingsRow::Theme => open_theme_picker(app),
         SettingsRow::DefaultExplainModel => open_saved_model_picker(app),
         SettingsRow::GitHubToken => open_github_token_prompt(app),
         SettingsRow::Keybindings => open_keybinding_picker(app),
     }
+}
+
+fn open_theme_picker(app: &mut App) {
+    app.overlay = Overlay::ThemePicker;
+    app.theme_cursor = theme_picker_cursor(app.settings.theme);
+    app.status = "Choose a UI theme.".to_string();
 }
 
 fn open_github_token_prompt(app: &mut App) {
@@ -1486,6 +1536,7 @@ async fn request_explain_with_target(
 }
 
 fn draw(frame: &mut ratatui::Frame, app: &App, commit_message: &TextArea<'_>) {
+    styles::set_palette(app.palette);
     let size = frame.area();
     if app.screen == Screen::Home {
         draw_home(frame, size, app);
@@ -1494,6 +1545,7 @@ fn draw(frame: &mut ratatui::Frame, app: &App, commit_message: &TextArea<'_>) {
             Overlay::GitHubTokenPrompt => draw_github_token_prompt(frame, size, app),
             Overlay::PublishPrompt => draw_publish_prompt(frame, size, app),
             Overlay::Settings => draw_settings(frame, size, app),
+            Overlay::ThemePicker => draw_theme_picker(frame, size, app),
             Overlay::SettingsModelPicker => draw_saved_model_picker(frame, size, app),
             Overlay::KeybindingPicker => draw_keybinding_picker(frame, size, app),
             Overlay::ExplainMenu => draw_explain_menu(frame, size, app),
@@ -1522,6 +1574,7 @@ fn draw(frame: &mut ratatui::Frame, app: &App, commit_message: &TextArea<'_>) {
         Overlay::GitHubTokenPrompt => draw_github_token_prompt(frame, layout[1], app),
         Overlay::PublishPrompt => draw_publish_prompt(frame, layout[1], app),
         Overlay::Settings => draw_settings(frame, layout[1], app),
+        Overlay::ThemePicker => draw_theme_picker(frame, layout[1], app),
         Overlay::SettingsModelPicker => draw_saved_model_picker(frame, layout[1], app),
         Overlay::KeybindingPicker => draw_keybinding_picker(frame, layout[1], app),
         Overlay::ExplainMenu => draw_explain_menu(frame, layout[1], app),
@@ -1561,7 +1614,7 @@ fn render_home_top_bar(frame: &mut ratatui::Frame, area: Rect, _app: &App) {
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .border_style(Style::default().fg(styles::ACCENT_DIM)),
+                        .border_style(Style::default().fg(styles::accent_dim())),
                 ),
             pill,
         );
@@ -1569,8 +1622,9 @@ fn render_home_top_bar(frame: &mut ratatui::Frame, area: Rect, _app: &App) {
 }
 
 fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
+    styles::set_palette(app.palette);
     frame.render_widget(
-        Block::default().style(Style::default().bg(styles::BASE_BG)),
+        Block::default().style(Style::default().bg(styles::base_bg())),
         area,
     );
 
@@ -1691,8 +1745,8 @@ fn draw_home_progress_panel(frame: &mut ratatui::Frame, area: Rect, counts: &Rev
     frame.render_widget(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(styles::BORDER_MUTED))
-            .style(Style::default().bg(styles::SURFACE)),
+            .border_style(Style::default().fg(styles::border_muted()))
+            .style(Style::default().bg(styles::surface())),
         area,
     );
 
@@ -1735,7 +1789,7 @@ fn home_progress_bar(reviewed: usize, total: usize) -> Line<'static> {
     let filled = (reviewed * WIDTH).div_ceil(total);
     Line::from(vec![
         Span::styled("[", styles::subtle()),
-        Span::styled("■".repeat(filled), Style::default().fg(styles::ACCENT)),
+        Span::styled("■".repeat(filled), Style::default().fg(styles::accent())),
         Span::styled("·".repeat(WIDTH.saturating_sub(filled)), styles::subtle()),
         Span::styled("]", styles::subtle()),
     ])
@@ -1750,8 +1804,8 @@ fn draw_home_command_panel(
     frame.render_widget(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(styles::BORDER_MUTED))
-            .style(Style::default().bg(styles::SURFACE)),
+            .border_style(Style::default().fg(styles::border_muted()))
+            .style(Style::default().bg(styles::surface())),
         area,
     );
 
@@ -1819,7 +1873,7 @@ fn draw_home_command_row(
                     key.to_string(),
                     if primary {
                         Style::default()
-                            .fg(styles::ACCENT)
+                            .fg(styles::accent())
                             .add_modifier(Modifier::BOLD)
                     } else {
                         styles::keybind()
@@ -1830,7 +1884,7 @@ fn draw_home_command_row(
                     label.to_string(),
                     if primary {
                         Style::default()
-                            .fg(styles::TEXT_PRIMARY)
+                            .fg(styles::text_primary())
                             .add_modifier(Modifier::BOLD)
                     } else {
                         styles::title()
@@ -1846,7 +1900,7 @@ fn draw_home_command_row(
             .alignment(Alignment::Right)
             .style(
                 Style::default()
-                    .fg(styles::ACCENT)
+                    .fg(styles::accent())
                     .add_modifier(Modifier::BOLD),
             ),
         columns[2],
@@ -1870,16 +1924,17 @@ fn draw_home_tip(
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(styles::BORDER_MUTED))
-                .style(Style::default().bg(styles::SURFACE)),
+                .border_style(Style::default().fg(styles::border_muted()))
+                .style(Style::default().bg(styles::surface())),
         ),
         area,
     );
 }
 
 fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
+    styles::set_palette(app.palette);
     frame.render_widget(
-        Block::default().style(Style::default().bg(styles::BASE_BG)),
+        Block::default().style(Style::default().bg(styles::base_bg())),
         area,
     );
 
@@ -1901,7 +1956,7 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(styles::BORDER_MUTED)),
+                .border_style(Style::default().fg(styles::border_muted())),
         )
         .alignment(Alignment::Center)
         .wrap(Wrap { trim: true });
@@ -1916,8 +1971,8 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     frame.render_widget(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(styles::BORDER_MUTED))
-            .style(Style::default().bg(styles::SURFACE)),
+            .border_style(Style::default().fg(styles::border_muted()))
+            .style(Style::default().bg(styles::surface())),
         canvas,
     );
     let content = canvas.inner(ratatui::layout::Margin {
@@ -1944,11 +1999,11 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         .map(|(index, file)| {
             let style = if index == app.review.cursor_file {
                 Style::default()
-                    .fg(styles::TEXT_PRIMARY)
-                    .bg(styles::ACCENT_DIM)
+                    .fg(styles::text_primary())
+                    .bg(styles::accent_dim())
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(styles::TEXT_MUTED)
+                Style::default().fg(styles::text_muted())
             };
             let marker = review_marker(file.review_status.clone(), file.status, false);
             ListItem::new(Line::from(vec![
@@ -1967,9 +2022,9 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             .borders(Borders::RIGHT)
             .border_style(
                 Style::default().fg(if app.review.focus == ReviewFocus::Files {
-                    styles::ACCENT_BRIGHT
+                    styles::accent_bright_color()
                 } else {
-                    styles::BORDER_MUTED
+                    styles::border_muted()
                 }),
             ),
     );
@@ -1997,12 +2052,12 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             let is_current_line = app.review.focus == ReviewFocus::Hunks
                 && app.review.cursor_line == diff_lines.len();
             let mut style = Style::default()
-                .fg(styles::TEXT_PRIMARY)
-                .bg(styles::SURFACE_RAISED);
+                .fg(styles::text_primary())
+                .bg(styles::surface_raised());
             if is_current_hunk {
                 style = Style::default()
-                    .fg(styles::TEXT_PRIMARY)
-                    .bg(styles::ACCENT_DIM)
+                    .fg(styles::text_primary())
+                    .bg(styles::accent_dim())
                     .add_modifier(Modifier::BOLD);
             }
             if is_current_line {
@@ -2011,10 +2066,10 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 
             let status = match hunk.review_status {
                 ReviewStatus::Accepted => {
-                    Span::styled(" [accepted]", Style::default().fg(styles::CODE_ADD))
+                    Span::styled(" [accepted]", Style::default().fg(styles::code_add()))
                 }
                 ReviewStatus::Rejected => {
-                    Span::styled(" [rejected]", Style::default().fg(styles::CODE_REMOVE))
+                    Span::styled(" [rejected]", Style::default().fg(styles::code_remove()))
                 }
                 ReviewStatus::Unreviewed => Span::styled(" [unreviewed]", styles::muted()),
             };
@@ -2039,13 +2094,13 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                     DiffLineKind::Context => " ",
                 };
                 let style = match line.kind {
-                    DiffLineKind::Add => Style::default().fg(styles::CODE_ADD),
-                    DiffLineKind::Remove => Style::default().fg(styles::CODE_REMOVE),
-                    DiffLineKind::Context => Style::default().fg(styles::TEXT_MUTED),
+                    DiffLineKind::Add => Style::default().fg(styles::code_add()),
+                    DiffLineKind::Remove => Style::default().fg(styles::code_remove()),
+                    DiffLineKind::Context => Style::default().fg(styles::text_muted()),
                 };
                 let style = if is_current_line {
                     style
-                        .bg(styles::SURFACE_RAISED)
+                        .bg(styles::surface_raised())
                         .add_modifier(Modifier::UNDERLINED)
                 } else {
                     style
@@ -2075,13 +2130,13 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     let why_block = Block::default()
         .title(Line::from(Span::styled("Explain", styles::title())))
         .borders(Borders::LEFT)
-        .border_style(Style::default().fg(styles::BORDER_MUTED))
-        .style(Style::default().bg(styles::SURFACE_RAISED));
+        .border_style(Style::default().fg(styles::border_muted()))
+        .style(Style::default().bg(styles::surface_raised()));
     let why_lines = explain_panel_lines(app);
     frame.render_widget(
         Paragraph::new(why_lines)
             .block(why_block)
-            .style(Style::default().bg(styles::SURFACE_RAISED))
+            .style(Style::default().bg(styles::surface_raised()))
             .wrap(Wrap { trim: true }),
         sections[2],
     );
@@ -2091,7 +2146,7 @@ fn draw_session_picker(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     let modal = centered_rect(58, 42, area);
     frame.render_widget(Clear, modal);
     frame.render_widget(
-        Block::default().style(Style::default().bg(styles::SURFACE_RAISED)),
+        Block::default().style(Style::default().bg(styles::surface_raised())),
         modal,
     );
     let inner = modal.inner(ratatui::layout::Margin {
@@ -2110,11 +2165,11 @@ fn draw_session_picker(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         .map(|(index, session)| {
             let style = if index == app.session_state.cursor {
                 Style::default()
-                    .fg(styles::TEXT_PRIMARY)
-                    .bg(styles::ACCENT_DIM)
+                    .fg(styles::text_primary())
+                    .bg(styles::accent_dim())
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(styles::TEXT_MUTED)
+                Style::default().fg(styles::text_muted())
             };
             let marker = if app.session_state.selected == Some(index) {
                 "[✓]"
@@ -2136,8 +2191,8 @@ fn draw_session_picker(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                     styles::title(),
                 )))
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(styles::ACCENT_BRIGHT))
-                .style(Style::default().bg(styles::SURFACE_RAISED)),
+                .border_style(Style::default().fg(styles::accent_bright_color()))
+                .style(Style::default().bg(styles::surface_raised())),
         ),
         sections[0],
         &mut state,
@@ -2150,7 +2205,7 @@ fn draw_session_picker(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             Span::styled("Esc", styles::keybind()),
             Span::styled(" close", styles::muted()),
         ]))
-        .style(Style::default().bg(styles::SURFACE_RAISED)),
+        .style(Style::default().bg(styles::surface_raised())),
         sections[1],
     );
 }
@@ -2177,11 +2232,100 @@ fn draw_saved_model_picker(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     );
 }
 
+fn draw_theme_picker(frame: &mut ratatui::Frame, area: Rect, app: &App) {
+    styles::set_palette(app.palette);
+    let modal = centered_rect(54, 42, area);
+    frame.render_widget(Clear, modal);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(styles::surface_raised())),
+        modal,
+    );
+    let inner = modal.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(4),
+            Constraint::Length(2),
+        ])
+        .split(inner);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Theme", styles::title()),
+            Span::styled("  Pick the UI color palette.", styles::muted()),
+        ]))
+        .style(Style::default().bg(styles::surface_raised())),
+        sections[0],
+    );
+
+    let rows = theme_picker_items(app);
+    let mut state = ListState::default().with_selected(Some(app.theme_cursor));
+    frame.render_stateful_widget(
+        List::new(rows)
+            .block(Block::default().style(Style::default().bg(styles::surface_raised()))),
+        sections[1],
+        &mut state,
+    );
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!(
+                    "{}/{}",
+                    key_for(app, KeybindingCommand::MoveDown),
+                    key_for(app, KeybindingCommand::MoveUp)
+                ),
+                styles::keybind(),
+            ),
+            Span::styled(" move", styles::muted()),
+            Span::raw("  "),
+            Span::styled("Enter", styles::keybind()),
+            Span::styled(" select", styles::muted()),
+            Span::raw("  "),
+            Span::styled("Esc", styles::keybind()),
+            Span::styled(" back", styles::muted()),
+        ]))
+        .style(Style::default().bg(styles::surface_raised())),
+        sections[2],
+    );
+}
+
+fn theme_picker_items(app: &App) -> Vec<ListItem<'static>> {
+    ThemePreset::ALL
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, theme)| {
+            let style = if index == app.theme_cursor {
+                Style::default()
+                    .fg(styles::text_primary())
+                    .bg(styles::accent_dim())
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(styles::text_muted())
+            };
+            let marker = if app.settings.theme == theme {
+                "[✓]"
+            } else {
+                "[ ]"
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!(" {marker} "), style),
+                Span::styled(theme.label().to_string(), style),
+            ]))
+        })
+        .collect()
+}
+
 fn draw_keybinding_picker(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     let modal = centered_rect(62, 58, area);
     frame.render_widget(Clear, modal);
     frame.render_widget(
-        Block::default().style(Style::default().bg(styles::SURFACE_RAISED)),
+        Block::default().style(Style::default().bg(styles::surface_raised())),
         modal,
     );
     let inner = modal.inner(ratatui::layout::Margin {
@@ -2202,14 +2346,15 @@ fn draw_keybinding_picker(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             Span::styled("Keybindings", styles::title()),
             Span::styled("  Each command needs its own letter.", styles::muted()),
         ]))
-        .style(Style::default().bg(styles::SURFACE_RAISED)),
+        .style(Style::default().bg(styles::surface_raised())),
         sections[0],
     );
 
     let rows = keybinding_picker_items(app);
     let mut state = ListState::default().with_selected(Some(app.keybinding_cursor));
     frame.render_stateful_widget(
-        List::new(rows).block(Block::default().style(Style::default().bg(styles::SURFACE_RAISED))),
+        List::new(rows)
+            .block(Block::default().style(Style::default().bg(styles::surface_raised()))),
         sections[1],
         &mut state,
     );
@@ -2243,7 +2388,7 @@ fn draw_keybinding_picker(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         ])
     };
     frame.render_widget(
-        Paragraph::new(help).style(Style::default().bg(styles::SURFACE_RAISED)),
+        Paragraph::new(help).style(Style::default().bg(styles::surface_raised())),
         sections[2],
     );
 }
@@ -2258,11 +2403,11 @@ fn keybinding_picker_items(app: &App) -> Vec<ListItem<'static>> {
             let capturing = app.keybinding_capture == Some(command);
             let style = if selected || capturing {
                 Style::default()
-                    .fg(styles::TEXT_PRIMARY)
-                    .bg(styles::ACCENT_DIM)
+                    .fg(styles::text_primary())
+                    .bg(styles::accent_dim())
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(styles::TEXT_MUTED)
+                Style::default().fg(styles::text_muted())
             };
             let marker = if capturing {
                 "?"
@@ -2294,7 +2439,7 @@ fn draw_model_picker_modal(
     let modal = centered_rect(62, 48, area);
     frame.render_widget(Clear, modal);
     frame.render_widget(
-        Block::default().style(Style::default().bg(styles::SURFACE_RAISED)),
+        Block::default().style(Style::default().bg(styles::surface_raised())),
         modal,
     );
     let inner = modal.inner(ratatui::layout::Margin {
@@ -2350,7 +2495,7 @@ fn draw_model_picker_modal(
     if let Some(error) = &app.why_this.model.last_error {
         rows.push(ListItem::new(Line::from(Span::styled(
             format!(" Error: {error}"),
-            Style::default().fg(styles::DANGER),
+            Style::default().fg(styles::danger()),
         ))));
         rows.push(ListItem::new(Line::from(Span::styled(
             " Close and reopen this picker to retry.",
@@ -2364,8 +2509,8 @@ fn draw_model_picker_modal(
             Block::default()
                 .title(Line::from(Span::styled(title, styles::title())))
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(styles::ACCENT_BRIGHT))
-                .style(Style::default().bg(styles::SURFACE_RAISED)),
+                .border_style(Style::default().fg(styles::accent_bright_color()))
+                .style(Style::default().bg(styles::surface_raised())),
         ),
         sections[0],
         &mut state,
@@ -2379,7 +2524,7 @@ fn draw_model_picker_modal(
             Span::styled("Esc", styles::keybind()),
             Span::styled(" close", styles::muted()),
         ]))
-        .style(Style::default().bg(styles::SURFACE_RAISED)),
+        .style(Style::default().bg(styles::surface_raised())),
         sections[1],
     );
 }
@@ -2393,10 +2538,10 @@ fn draw_explain_menu(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                 Block::default()
                     .title(Line::from(Span::styled("Explain", styles::title())))
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(styles::ACCENT_BRIGHT))
-                    .style(Style::default().bg(styles::SURFACE_RAISED)),
+                    .border_style(Style::default().fg(styles::accent_bright_color()))
+                    .style(Style::default().bg(styles::surface_raised())),
             )
-            .style(Style::default().bg(styles::SURFACE_RAISED))
+            .style(Style::default().bg(styles::surface_raised()))
             .wrap(Wrap { trim: true }),
         modal,
     );
@@ -2410,11 +2555,11 @@ fn model_picker_item(
 ) -> ListItem<'static> {
     let style = if index == cursor {
         Style::default()
-            .fg(styles::TEXT_PRIMARY)
-            .bg(styles::ACCENT_DIM)
+            .fg(styles::text_primary())
+            .bg(styles::accent_dim())
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(styles::TEXT_MUTED)
+        Style::default().fg(styles::text_muted())
     };
     let marker = if selected_value { "[✓]" } else { "[ ]" };
 
@@ -2433,10 +2578,10 @@ fn draw_explain_history(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                 Block::default()
                     .title(Line::from(Span::styled("Explain History", styles::title())))
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(styles::ACCENT_BRIGHT))
-                    .style(Style::default().bg(styles::SURFACE_RAISED)),
+                    .border_style(Style::default().fg(styles::accent_bright_color()))
+                    .style(Style::default().bg(styles::surface_raised())),
             )
-            .style(Style::default().bg(styles::SURFACE_RAISED))
+            .style(Style::default().bg(styles::surface_raised()))
             .wrap(Wrap { trim: true }),
         modal,
     );
@@ -2528,7 +2673,7 @@ fn explain_menu_lines(app: &App) -> Vec<Line<'static>> {
         lines.push(Line::from(Span::styled(
             "Choose a context source before you run Explain.",
             Style::default()
-                .fg(styles::DANGER)
+                .fg(styles::danger())
                 .add_modifier(Modifier::BOLD),
         )));
     }
@@ -2675,11 +2820,11 @@ fn render_explain_history_list_lines(app: &App) -> Vec<Line<'static>> {
         let marker = if selected { ">" } else { " " };
         let style = if selected {
             Style::default()
-                .fg(styles::TEXT_PRIMARY)
-                .bg(styles::ACCENT_DIM)
+                .fg(styles::text_primary())
+                .bg(styles::accent_dim())
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(styles::TEXT_MUTED)
+            Style::default().fg(styles::text_muted())
         };
 
         lines.push(Line::from(vec![
@@ -2745,7 +2890,7 @@ fn render_explain_run_lines(
             lines.push(Line::from(Span::styled(
                 "Explain could not produce a valid answer.",
                 Style::default()
-                    .fg(styles::DANGER)
+                    .fg(styles::danger())
                     .add_modifier(Modifier::BOLD),
             )));
             if let Some(error) = &run.error {
@@ -3059,6 +3204,17 @@ fn selected_publish_action(app: &App) -> PublishAction {
     PUBLISH_ACTIONS[app.publish_cursor.min(PUBLISH_ACTIONS.len() - 1)]
 }
 
+fn selected_theme(app: &App) -> ThemePreset {
+    ThemePreset::ALL[app.theme_cursor.min(ThemePreset::ALL.len() - 1)]
+}
+
+fn theme_picker_cursor(theme: ThemePreset) -> usize {
+    ThemePreset::ALL
+        .iter()
+        .position(|candidate| *candidate == theme)
+        .unwrap_or(0)
+}
+
 fn settings_lines(app: &App) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
 
@@ -3067,11 +3223,11 @@ fn settings_lines(app: &App) -> Vec<Line<'static>> {
         let selected = index == app.settings_cursor;
         let row_style = if selected {
             Style::default()
-                .fg(styles::TEXT_PRIMARY)
-                .bg(styles::ACCENT_DIM)
+                .fg(styles::text_primary())
+                .bg(styles::accent_dim())
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(styles::TEXT_MUTED)
+            Style::default().fg(styles::text_muted())
         };
         let marker = if selected { ">" } else { " " };
         lines.push(Line::from(vec![
@@ -3085,6 +3241,7 @@ fn settings_lines(app: &App) -> Vec<Line<'static>> {
 
 fn settings_row_content(app: &App, row: SettingsRow) -> (&'static str, String) {
     match row {
+        SettingsRow::Theme => ("Theme", app.settings.theme.label().to_string()),
         SettingsRow::DefaultExplainModel => (
             "Default model",
             saved_model_label(&app.settings.explain.default_model),
@@ -3207,8 +3364,8 @@ fn explain_run_status_label(status: &ExplainRunStatus) -> &'static str {
 fn explain_run_status_style(status: &ExplainRunStatus) -> Style {
     match status {
         ExplainRunStatus::Running => styles::accent_bold(),
-        ExplainRunStatus::Ready => Style::default().fg(styles::SUCCESS),
-        ExplainRunStatus::Failed => Style::default().fg(styles::DANGER),
+        ExplainRunStatus::Ready => Style::default().fg(styles::success()),
+        ExplainRunStatus::Failed => Style::default().fg(styles::danger()),
         ExplainRunStatus::Cancelled => styles::muted(),
     }
 }
@@ -3274,8 +3431,8 @@ fn draw_commit_prompt(
     let block = Block::default()
         .title("Commit Accepted Changes")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(styles::BORDER_MUTED))
-        .style(Style::default().bg(styles::SURFACE_RAISED));
+        .border_style(Style::default().fg(styles::border_muted()))
+        .style(Style::default().bg(styles::surface_raised()));
     frame.render_widget(block, modal);
     frame.render_widget(
         Paragraph::new(format!(
@@ -3324,8 +3481,8 @@ fn draw_github_token_prompt(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         Block::default()
             .title("GitHub Token")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(styles::BORDER_MUTED))
-            .style(Style::default().bg(styles::SURFACE_RAISED)),
+            .border_style(Style::default().fg(styles::border_muted()))
+            .style(Style::default().bg(styles::surface_raised())),
         modal,
     );
     frame.render_widget(
@@ -3348,7 +3505,7 @@ fn draw_github_token_prompt(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             Span::styled("Esc", styles::keybind()),
             Span::styled(" cancel", styles::muted()),
         ]))
-        .style(Style::default().bg(styles::SURFACE_RAISED)),
+        .style(Style::default().bg(styles::surface_raised())),
         sections[3],
     );
 }
@@ -3357,7 +3514,7 @@ fn draw_publish_prompt(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     let modal = centered_rect(54, 34, area);
     frame.render_widget(Clear, modal);
     frame.render_widget(
-        Block::default().style(Style::default().bg(styles::SURFACE_RAISED)),
+        Block::default().style(Style::default().bg(styles::surface_raised())),
         modal,
     );
     let inner = modal.inner(ratatui::layout::Margin {
@@ -3382,21 +3539,21 @@ fn draw_publish_prompt(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                 styles::muted(),
             )),
         ])
-        .style(Style::default().bg(styles::SURFACE_RAISED)),
+        .style(Style::default().bg(styles::surface_raised())),
         sections[0],
     );
 
     let mut state = ListState::default().with_selected(Some(app.publish_cursor));
     frame.render_stateful_widget(
         List::new(publish_prompt_items(app))
-            .block(Block::default().style(Style::default().bg(styles::SURFACE_RAISED))),
+            .block(Block::default().style(Style::default().bg(styles::surface_raised()))),
         sections[1],
         &mut state,
     );
 
     frame.render_widget(
         Paragraph::new(publish_status_line(app))
-            .style(Style::default().bg(styles::SURFACE_RAISED))
+            .style(Style::default().bg(styles::surface_raised()))
             .wrap(Wrap { trim: true }),
         sections[2],
     );
@@ -3419,7 +3576,7 @@ fn draw_publish_prompt(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             Span::styled("Esc", styles::keybind()),
             Span::styled(" later", styles::muted()),
         ]))
-        .style(Style::default().bg(styles::SURFACE_RAISED)),
+        .style(Style::default().bg(styles::surface_raised())),
         sections[3],
     );
 }
@@ -3451,11 +3608,11 @@ fn publish_prompt_items(app: &App) -> Vec<ListItem<'static>> {
             let selected = index == app.publish_cursor;
             let style = if selected && !app.publish_busy {
                 Style::default()
-                    .fg(styles::TEXT_PRIMARY)
-                    .bg(styles::ACCENT_DIM)
+                    .fg(styles::text_primary())
+                    .bg(styles::accent_dim())
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(styles::TEXT_MUTED)
+                Style::default().fg(styles::text_muted())
             };
             let marker = if selected { ">" } else { " " };
             ListItem::new(Line::from(Span::styled(
@@ -3477,7 +3634,7 @@ fn draw_settings(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     let modal = centered_rect(58, 36, area);
     frame.render_widget(Clear, modal);
     frame.render_widget(
-        Block::default().style(Style::default().bg(styles::SURFACE_RAISED)),
+        Block::default().style(Style::default().bg(styles::surface_raised())),
         modal,
     );
     let inner = modal.inner(ratatui::layout::Margin {
@@ -3498,14 +3655,14 @@ fn draw_settings(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             Line::from(Span::styled("Settings", styles::title())),
             Line::from(Span::styled("Saved preferences", styles::muted())),
         ])
-        .style(Style::default().bg(styles::SURFACE_RAISED)),
+        .style(Style::default().bg(styles::surface_raised())),
         sections[0],
     );
 
     let rows = settings_lines(app);
     frame.render_widget(
         Paragraph::new(rows)
-            .style(Style::default().bg(styles::SURFACE_RAISED))
+            .style(Style::default().bg(styles::surface_raised()))
             .wrap(Wrap { trim: true }),
         sections[1],
     );
@@ -3528,7 +3685,7 @@ fn draw_settings(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             Span::styled("Esc", styles::keybind()),
             Span::styled(" close", styles::muted()),
         ]))
-        .style(Style::default().bg(styles::SURFACE_RAISED)),
+        .style(Style::default().bg(styles::surface_raised())),
         sections[2],
     );
 }
@@ -3688,7 +3845,7 @@ fn render_why_answer_lines(answer: &WhyAnswer) -> Vec<Line<'static>> {
     lines.extend(render_why_section(
         &format!("Risk ({}):", risk_level_label(answer.risk_level.clone())),
         Style::default()
-            .fg(styles::DANGER)
+            .fg(styles::danger())
             .add_modifier(Modifier::BOLD),
         &answer.risk_reason,
     ));
@@ -3771,9 +3928,11 @@ fn render_brand_lockup(frame: &mut ratatui::Frame, area: Rect, app: &App, alignm
     let icon_area = Rect::new(x, area.y, icon_width, 1);
 
     let icon_style = if icon == BRAND_ICON_ALT {
-        AnimatedTextStyle::pulse(styles::SUCCESS, styles::ACCENT_BRIGHT).modifiers(Modifier::BOLD)
+        AnimatedTextStyle::pulse(styles::success(), styles::accent_bright_color())
+            .modifiers(Modifier::BOLD)
     } else {
-        AnimatedTextStyle::pulse(styles::ACCENT, styles::ACCENT_BRIGHT).modifiers(Modifier::BOLD)
+        AnimatedTextStyle::pulse(styles::accent(), styles::accent_bright_color())
+            .modifiers(Modifier::BOLD)
     };
 
     AnimatedText::new(icon, &app.logo_animation)
@@ -3784,7 +3943,7 @@ fn render_brand_lockup(frame: &mut ratatui::Frame, area: Rect, app: &App, alignm
         let word_area = Rect::new(x + icon_width + gap_width, area.y, word_width, 1);
         AnimatedText::new(BRAND_WORDMARK, &app.logo_animation)
             .style(
-                AnimatedTextStyle::wave(styles::TEXT_MUTED, styles::ACCENT_BRIGHT)
+                AnimatedTextStyle::wave(styles::text_muted(), styles::accent_bright_color())
                     .modifiers(Modifier::BOLD)
                     .wave_width(4),
             )
@@ -3862,7 +4021,9 @@ mod tests {
             opencode: None,
             settings: AppSettings::default(),
             settings_store: SettingsStore::from_path(PathBuf::from("/tmp/better-review-test.json")),
+            palette: Palette::from_theme(ThemePreset::default()),
             settings_cursor: 0,
+            theme_cursor: 0,
             github_token_input: new_github_token_input(),
             keybinding_cursor: 0,
             keybinding_capture: None,
@@ -4395,12 +4556,12 @@ mod tests {
         });
         assert!(lines.iter().any(|line| {
             line.spans.iter().any(|span| {
-                span.content.as_ref() == "Summary:" && span.style.fg == Some(styles::ACCENT)
+                span.content.as_ref() == "Summary:" && span.style.fg == Some(styles::accent())
             })
         }));
         assert!(lines.iter().any(|line| {
             line.spans.iter().any(|span| {
-                span.content.as_ref() == "Risk (medium):" && span.style.fg == Some(styles::DANGER)
+                span.content.as_ref() == "Risk (medium):" && span.style.fg == Some(styles::danger())
             })
         }));
     }
@@ -4447,6 +4608,7 @@ mod tests {
             explain: ExplainSettings {
                 default_model: Some("openai/gpt-5.4".to_string()),
             },
+            theme: ThemePreset::Dracula,
             github: crate::settings::GitHubSettings::default(),
             keybindings: KeybindingsSettings::default(),
         };
@@ -4456,6 +4618,8 @@ mod tests {
         app.apply_saved_settings();
 
         assert_eq!(app.saved_model_cursor, 1);
+        assert_eq!(app.theme_cursor, theme_picker_cursor(ThemePreset::Dracula));
+        assert_eq!(app.palette, Palette::from_theme(ThemePreset::Dracula));
         assert_eq!(
             app.why_this.model_override,
             Some(WhyModelChoice::Explicit("openai/gpt-5".to_string()))
@@ -4495,11 +4659,32 @@ mod tests {
             .join("\n");
 
         assert!(text.contains("Default model"));
+        assert!(text.contains("Theme"));
+        assert!(text.contains("One Dark Pro"));
         assert!(text.contains("GitHub token"));
         assert!(text.contains("Keybindings"));
         assert!(!text.contains("Press Enter"));
         assert!(!text.contains("Enter edits"));
         assert!(!text.contains("Config:"));
+    }
+
+    #[test]
+    fn theme_picker_updates_persistent_theme_and_palette() {
+        let mut app = sample_app(ReviewUiState {
+            files: vec![sample_file()],
+            ..ReviewUiState::default()
+        });
+        let temp = tempfile::tempdir().unwrap();
+        app.settings_store = SettingsStore::from_path(temp.path().join("config.json"));
+        open_theme_picker(&mut app);
+        app.theme_cursor = theme_picker_cursor(ThemePreset::TokyoNight);
+
+        handle_theme_picker_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(app.overlay, Overlay::Settings);
+        assert_eq!(app.settings.theme, ThemePreset::TokyoNight);
+        assert_eq!(app.palette, Palette::from_theme(ThemePreset::TokyoNight));
+        assert!(app.status.contains("Theme set to Tokyo Night"));
     }
 
     #[test]

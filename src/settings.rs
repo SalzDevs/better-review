@@ -12,6 +12,7 @@ const SETTINGS_DIR_NAME: &str = "better-review";
 pub struct AppSettings {
     pub version: u8,
     pub explain: ExplainSettings,
+    pub theme: ThemePreset,
     pub github: GitHubSettings,
     pub keybindings: KeybindingsSettings,
 }
@@ -21,8 +22,43 @@ impl Default for AppSettings {
         Self {
             version: 1,
             explain: ExplainSettings::default(),
+            theme: ThemePreset::default(),
             github: GitHubSettings::default(),
             keybindings: KeybindingsSettings::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemePreset {
+    #[default]
+    OneDarkPro,
+    Dracula,
+    TokyoNight,
+    NightOwl,
+}
+
+impl std::fmt::Display for ThemePreset {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.label())
+    }
+}
+
+impl ThemePreset {
+    pub const ALL: [Self; 4] = [
+        Self::OneDarkPro,
+        Self::Dracula,
+        Self::TokyoNight,
+        Self::NightOwl,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::OneDarkPro => "One Dark Pro",
+            Self::Dracula => "Dracula",
+            Self::TokyoNight => "Tokyo Night",
+            Self::NightOwl => "Night Owl",
         }
     }
 }
@@ -168,6 +204,7 @@ mod tests {
             explain: ExplainSettings {
                 default_model: Some("openai/gpt-5.4".to_string()),
             },
+            theme: ThemePreset::TokyoNight,
             github: GitHubSettings::default(),
             keybindings: KeybindingsSettings::default(),
         };
@@ -207,6 +244,7 @@ mod tests {
                 explain: ExplainSettings {
                     default_model: Some("openai/gpt-5.4".to_string()),
                 },
+                theme: ThemePreset::default(),
                 github: GitHubSettings::default(),
                 keybindings: KeybindingsSettings::default(),
             }
@@ -233,6 +271,7 @@ mod tests {
         let loaded = store.load().unwrap();
         assert_eq!(loaded.keybindings.refresh, "r");
         assert_eq!(loaded.keybindings.explain_context, "o");
+        assert_eq!(loaded.theme, ThemePreset::default());
         assert_eq!(loaded.github, GitHubSettings::default());
     }
 }

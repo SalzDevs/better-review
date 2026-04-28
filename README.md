@@ -131,6 +131,17 @@ After a successful commit, `better-review` can push the reviewed commit from the
 
 Use a fine-grained GitHub token with repository Contents read/write access.
 
+## Settings
+
+Press `s` to open Settings. From there you can choose a UI theme, set the persistent default Explain model, save a GitHub token, or change single-letter keybindings.
+
+Available themes:
+
+- One Dark Pro
+- Dracula
+- Tokyo Night
+- Night Owl
+
 ## Explain (optional)
 
 `Explain` is available when local `opencode` is installed and the repository has local `opencode` session history.
