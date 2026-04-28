@@ -2150,10 +2150,14 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             for line in &hunk.lines {
                 let is_current_line = app.review.focus == ReviewFocus::Hunks
                     && app.review.cursor_line == diff_lines.len();
+                let change_bar = match line.kind {
+                    DiffLineKind::Add | DiffLineKind::Remove => "▌",
+                    DiffLineKind::Context => " ",
+                };
                 let prefix = match line.kind {
-                    DiffLineKind::Add => "▌+",
-                    DiffLineKind::Remove => "▌-",
-                    DiffLineKind::Context => "  ",
+                    DiffLineKind::Add => "+",
+                    DiffLineKind::Remove => "-",
+                    DiffLineKind::Context => " ",
                 };
                 let modifier = if is_current_line {
                     Modifier::UNDERLINED
@@ -2174,6 +2178,10 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                     Span::styled(
                         format!("{old} {new} "),
                         line_number_style(line.kind).add_modifier(modifier),
+                    ),
+                    Span::styled(
+                        change_bar,
+                        diff_change_bar_style(line.kind).add_modifier(modifier),
                     ),
                     Span::styled(prefix, diff_marker_style(line.kind).add_modifier(modifier)),
                     Span::styled(" ", line_style),
@@ -4008,6 +4016,20 @@ fn line_number_style(kind: DiffLineKind) -> Style {
             .fg(styles::syntax_comment())
             .bg(styles::code_remove_gutter_bg()),
         DiffLineKind::Context => styles::subtle(),
+    }
+}
+
+fn diff_change_bar_style(kind: DiffLineKind) -> Style {
+    match kind {
+        DiffLineKind::Add => Style::default()
+            .fg(styles::code_add_gutter_fg())
+            .bg(styles::code_add_gutter_bg())
+            .add_modifier(Modifier::BOLD),
+        DiffLineKind::Remove => Style::default()
+            .fg(styles::code_remove_gutter_fg())
+            .bg(styles::code_remove_gutter_bg())
+            .add_modifier(Modifier::BOLD),
+        DiffLineKind::Context => Style::default().fg(styles::text_muted()),
     }
 }
 
